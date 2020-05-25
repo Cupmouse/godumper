@@ -251,8 +251,8 @@ func Dump(exchange string, directory string, logger *log.Logger, errCh chan erro
 				subErrorCh = nil
 			}
 			break
-		case dumpError := <-readErrorCh:
-			err = fmt.Errorf("error on read thread: %v", dumpError)
+		case readError := <-readErrorCh:
+			err = fmt.Errorf("error on read thread: %v", readError)
 			break
 		case <-stop:
 			// received stop signal
@@ -278,12 +278,12 @@ func Dump(exchange string, directory string, logger *log.Logger, errCh chan erro
 	// wait for the read thread to stop
 	logger.Println("waiting for read thread to stop")
 	readErr, ok := <-readErrorCh
-	if !ok {
+	if ok {
 		if err != nil {
 			// append error
-			err = fmt.Errorf("error on dump thread: %v, previous error was: %v", readErr, err)
+			err = fmt.Errorf("error on read thread: %v, previous error was: %v", readErr, err)
 		} else {
-			err = fmt.Errorf("error on dump thread: %v", err)
+			err = fmt.Errorf("error on read thread: %v", readErr)
 		}
 	}
 

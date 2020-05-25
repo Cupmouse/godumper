@@ -85,7 +85,7 @@ func (w *Writer) open(timestamp int64) (correctedTimestamp int64, err error) {
 	} else if minute%10 == 0 {
 		// if last digit of minute is 0 then write state snapshot
 		var snapshots []simulator.Snapshot
-		snapshots, err = w.sim.TakeSnapshot()
+		snapshots, err = w.sim.TakeStateSnapshot()
 		for _, s := range snapshots {
 			stateLine := fmt.Sprintf("state\t%d\t%s\t%s\n", timestamp, s.Channel, s.Snapshot)
 			_, err = w.gwriter.Write([]byte(stateLine))
@@ -138,6 +138,10 @@ func (w *Writer) Message(timestamp int64, message []byte) (err error) {
 	}
 	var channel string
 	channel, err = w.sim.ProcessMessage(message)
+	if channel == "" || channel == simulator.ChannelUnknown {
+		// simulator could not determine the channel of message
+		w.logger.Println("channel is unknown:", string(message))
+	}
 	// write message despite the error (if happened)
 	w.gwriter.Write([]byte(fmt.Sprintf("msg\t%d\t%s\t", timestamp, channel)))
 	w.gwriter.Write(message)
@@ -157,6 +161,10 @@ func (w *Writer) Send(timestamp int64, message []byte) (err error) {
 	}
 	var channel string
 	channel, err = w.sim.ProcessSend(message)
+	if channel == "" || channel == simulator.ChannelUnknown {
+		// simulator could not determine the channel of message
+		w.logger.Println("channel is unknown:", string(message))
+	}
 	w.gwriter.Write([]byte(fmt.Sprintf("send\t%d\t%s\t", timestamp, channel)))
 	w.gwriter.Write(message)
 	w.gwriter.Write([]byte("\n"))
