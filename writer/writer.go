@@ -51,8 +51,8 @@ func (w *Writer) open(timestamp int64) (correctedTimestamp int64, err error) {
 		return
 	}
 
-	// new name for file would be <exchange>_<timestamp>.gzip
-	fileName := fmt.Sprintf("%s_%d.gzip", w.exchange, timestamp)
+	// new name for file would be <exchange>_<timestamp>.gz
+	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, timestamp)
 	filePath := path.Join(w.directory, fileName)
 
 	w.logger.Printf("making new file: %s\n", fileName)
