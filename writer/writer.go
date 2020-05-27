@@ -145,7 +145,7 @@ func (w *Writer) uploadOrStore() (err error) {
 	}
 	filePath := path.Join(w.directory, fileName)
 	var file *os.File
-	file, err = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 744)
+	file, err = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0744)
 	if err != nil {
 		return
 	}
