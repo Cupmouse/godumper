@@ -1,6 +1,8 @@
 package writer
 
 import (
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -10,15 +12,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/exchangedataset/streamcommons"
 	"github.com/exchangedataset/streamcommons/simulator"
 )
+
+// WriterBufferSize is the size of dataset buffer, 5MB
+const WriterBufferSize = 5 * 1024 * 1024
 
 // Writer writes messages to gzipped file
 type Writer struct {
 	closed        bool
 	lastTimestamp int64
 	lock          sync.Mutex
-	file          *os.File
+	fileTimestamp int64
+	buffer        *bytes.Buffer
+	writer        *bufio.Writer
 	gwriter       *gzip.Writer
 	exchange      string
 	url           string
@@ -27,9 +35,9 @@ type Writer struct {
 	sim           simulator.Simulator
 }
 
-func (w *Writer) open(timestamp int64) (correctedTimestamp int64, err error) {
+func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err error) {
 	if w.closed {
-		err = errors.New("tried to open already closed writer")
+		err = errors.New("tried to write to an already closed writer")
 		return
 	}
 
@@ -46,82 +54,116 @@ func (w *Writer) open(timestamp int64) (correctedTimestamp int64, err error) {
 	minute := int64(time.Duration(timestamp) / time.Minute)
 	lastMinute := int64(time.Duration(w.lastTimestamp) / time.Minute)
 
-	if w.file != nil && minute == lastMinute {
+	// set timestamp as last write time, this have to be after lastMinute is calculated
+	w.lastTimestamp = timestamp
+
+	if minute == lastMinute {
 		// continues to use the same stream & file name
 		return
 	}
+	// time to split dataset
 
-	// new name for file would be <exchange>_<timestamp>.gz
-	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, timestamp)
-	filePath := path.Join(w.directory, fileName)
-
-	w.logger.Printf("making new file: %s\n", fileName)
-
-	isFirstFile := w.file == nil
-
-	// change file name
-	// close file and gzip writer if previous one exist
-	if !isFirstFile {
-		err = w.close()
-		if err != nil {
-			return
-		}
-	}
-
-	// make directories to store file
-	os.MkdirAll(w.directory, 0744)
-	// open new file
-	w.file, err = os.Create(filePath)
-	// prepare gzip writer
-	w.gwriter = gzip.NewWriter(w.file)
-
+	isFirstFile := w.buffer == nil
 	if isFirstFile {
+		// create new buffer
+		bufArr := make([]byte, 0, WriterBufferSize)
+		w.buffer = bytes.NewBuffer(bufArr)
+		// prepare buffer writer
+		w.writer = bufio.NewWriter(w.buffer)
+		// prepare gzip writer
+		w.gwriter = gzip.NewWriter(w.writer)
+
 		// write start line
 		startLine := fmt.Sprintf("start\t%d\t%s\n", timestamp, w.url)
 		_, err = w.gwriter.Write([]byte(startLine))
 		if err != nil {
 			return
 		}
-	} else if minute%10 == 0 {
-		// if last digit of minute is 0 then write state snapshot
-		var snapshots []simulator.Snapshot
-		snapshots, err = w.sim.TakeStateSnapshot()
-		for _, s := range snapshots {
-			stateLine := fmt.Sprintf("state\t%d\t%s\t%s\n", timestamp, s.Channel, s.Snapshot)
-			_, err = w.gwriter.Write([]byte(stateLine))
-			if err != nil {
-				return
+	} else {
+		// upload or store datasets before
+		err = w.uploadOrStore()
+		// reset from buffer, writer, gwriter
+		w.buffer.Reset()
+		w.writer.Reset(w.buffer)
+		w.gwriter.Reset(w.writer)
+		// this checks error from uploadOrStore
+		if err != nil {
+			return
+		}
+
+		if minute%10 == 0 {
+			// if last digit of minute is 0 then write state snapshot
+			var snapshots []simulator.Snapshot
+			snapshots, err = w.sim.TakeStateSnapshot()
+			for _, s := range snapshots {
+				stateLine := fmt.Sprintf("state\t%d\t%s\t%s\n", timestamp, s.Channel, s.Snapshot)
+				_, err = w.gwriter.Write([]byte(stateLine))
+				if err != nil {
+					return
+				}
 			}
 		}
 	}
-	// set given timestamp as last write time
-	w.lastTimestamp = timestamp
+
+	// change file timestamp, this is used to generate file name
+	w.fileTimestamp = timestamp
 
 	return
 }
 
-// close closes file and gzip writer but it won't lock w.lock and also does not mark it as closed
-func (w *Writer) close() (err error) {
-	serr := w.gwriter.Flush()
-	if serr != nil {
-		err = fmt.Errorf("error on flushing gzip: %v", serr)
+func (w *Writer) uploadOrStore() (err error) {
+	// name for file would be <exchange>_<timestamp>.gz
+	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, w.fileTimestamp)
+
+	// flush buffer
+	err = w.gwriter.Flush()
+	if err != nil {
+		return
 	}
-	serr = w.gwriter.Close()
-	if serr != nil {
-		if err != nil {
-			err = fmt.Errorf("error on closing gzip: %v, previous error was: %v", serr, err)
-		} else {
-			err = fmt.Errorf("error on closing gzip: %v", serr)
+	err = w.writer.Flush()
+	if err != nil {
+		return
+	}
+
+	// try to upload it to s3
+	// creating new reader from original buffer array because if you read bytes from
+	// buffer, read bytes will be lost from buffer
+	// we might use them later if s3 upload failed
+	err = streamcommons.PutS3Object(fileName, bytes.NewReader(w.buffer.Bytes()))
+	if err == nil {
+		// successful
+		w.logger.Println("uploaded to s3:", fileName)
+		return
+	}
+
+	// if can not be uploaded to s3, then store it in local storage
+	w.logger.Printf("Could not be uploaded to s3: %v\n", err)
+	// make directories to store file
+	err = os.MkdirAll(w.directory, 0744)
+	if err != nil {
+		return
+	}
+	filePath := path.Join(w.directory, fileName)
+	var file *os.File
+	file, err = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 744)
+	if err != nil {
+		return
+	}
+	defer func() {
+		// defer function to ensure that opened file be closed
+		serr := file.Close()
+		if serr != nil {
+			if err != nil {
+				err = fmt.Errorf("%v, original error was: %v", serr, err)
+			} else {
+				err = serr
+			}
 		}
-	}
-	serr = w.file.Close()
-	if serr != nil {
-		if err != nil {
-			err = fmt.Errorf("error on closing file: %v, previous error was: %v", serr, err)
-		} else {
-			err = fmt.Errorf("error on closing file: %v", serr)
-		}
-	}
+	}()
+
+	_, err = file.Write(w.buffer.Bytes())
+
+	w.logger.Printf("making new file: %s\n", fileName)
 	return
 }
 
@@ -132,7 +174,7 @@ func (w *Writer) Message(timestamp int64, message []byte) (err error) {
 	defer func() {
 		w.lock.Unlock()
 	}()
-	timestamp, err = w.open(timestamp)
+	timestamp, err = w.beforeWrite(timestamp)
 	if err != nil {
 		return
 	}
@@ -155,7 +197,7 @@ func (w *Writer) Send(timestamp int64, message []byte) (err error) {
 	defer func() {
 		w.lock.Unlock()
 	}()
-	timestamp, err = w.open(timestamp)
+	timestamp, err = w.beforeWrite(timestamp)
 	if err != nil {
 		return
 	}
@@ -177,7 +219,7 @@ func (w *Writer) Error(timestamp int64, message []byte) (err error) {
 	defer func() {
 		w.lock.Unlock()
 	}()
-	timestamp, err = w.open(timestamp)
+	timestamp, err = w.beforeWrite(timestamp)
 	if err != nil {
 		return
 	}
@@ -191,18 +233,45 @@ func (w *Writer) Close(timestamp int64) (err error) {
 	defer func() {
 		w.lock.Unlock()
 	}()
-	// if already closed, raise error
+	// already closed
 	if w.closed {
-		err = errors.New("writer is already closed, can not close again")
 		return
 	}
-	timestamp, err = w.open(timestamp)
+	timestamp, err = w.beforeWrite(timestamp)
 	if err != nil {
 		return
 	}
-	w.gwriter.Write([]byte(fmt.Sprintf("eos\t%d\n", timestamp)))
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("eos\t%d\n", timestamp)))
 	// report error as it is
-	err = w.close()
+	serr := w.gwriter.Flush()
+	if serr != nil {
+		err = fmt.Errorf("error on flushing gzip: %v", serr)
+	}
+	serr = w.gwriter.Close()
+	if serr != nil {
+		if err != nil {
+			err = fmt.Errorf("error on closing gzip: %v, previous error was: %v", serr, err)
+		} else {
+			err = fmt.Errorf("error on closing gzip: %v", serr)
+		}
+	}
+	serr = w.writer.Flush()
+	if serr != nil {
+		if err != nil {
+			err = fmt.Errorf("error on flushing writer: %v, previous error was: %v", serr, err)
+		} else {
+			err = fmt.Errorf("error on flushing writer: %v", serr)
+		}
+	}
+	// don't forget to upload!
+	serr = w.uploadOrStore()
+	if serr != nil {
+		if err != nil {
+			err = fmt.Errorf("%v, previous error was: %v", serr, err)
+		} else {
+			err = serr
+		}
+	}
 	w.closed = true
 	return
 }
