@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/exchangedataset/godumper/dumper"
@@ -40,7 +41,7 @@ func main() {
 		// putting this will disable default behavior to immediately exit the application
 		// instead ignore the signal
 		interruptSignal := make(chan os.Signal)
-		signal.Notify(interruptSignal, os.Interrupt)
+		signal.Notify(interruptSignal, os.Interrupt, syscall.SIGTERM)
 
 		errCh := make(chan error)
 		// buffering one is important
