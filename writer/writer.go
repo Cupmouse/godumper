@@ -229,7 +229,7 @@ func (w *Writer) Error(timestamp int64, message []byte) (err error) {
 	return
 }
 
-// Close closes this writer and underlying file and gzip writer. It also writes eos line.
+// Close closes this writer and underlying file and gzip writer. It also writes end line.
 func (w *Writer) Close(timestamp int64) (err error) {
 	w.lock.Lock()
 	defer func() {
@@ -244,7 +244,7 @@ func (w *Writer) Close(timestamp int64) (err error) {
 		return
 	}
 	// report error as it is
-	_, err = w.gwriter.Write([]byte(fmt.Sprintf("eos\t%d\n", timestamp)))
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("end\t%d\n", timestamp)))
 	// this will also flush buffer in gzip writer
 	serr := w.gwriter.Close()
 	if serr != nil {
