@@ -80,16 +80,26 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 			return
 		}
 	} else {
-		// upload or store datasets before
-		err = w.uploadOrStore()
-		// reset from buffer, writer, gwriter
-		w.buffer.Reset()
-		w.writer.Reset(w.buffer)
-		w.gwriter.Reset(w.writer)
-		// this checks error from uploadOrStore
+		// this will flush and write gzip footer
+		err = w.gwriter.Close()
 		if err != nil {
 			return
 		}
+		err = w.writer.Flush()
+		if err != nil {
+			return
+		}
+
+		// upload or store datasets
+		err = w.uploadOrStore()
+		if err != nil {
+			return
+		}
+		// emptify buffer
+		w.buffer.Reset()
+		// don't have to do anything to writer
+		// prepare gzip writer
+		w.gwriter = gzip.NewWriter(w.writer)
 
 		if minute%10 == 0 {
 			// if last digit of minute is 0 then write state snapshot
@@ -111,20 +121,12 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 	return
 }
 
+// this method assumes contents in buffer are complete
+// this means it does not perform flush or closing gzip writer
+// before writing the contents of buffer
 func (w *Writer) uploadOrStore() (err error) {
 	// name for file would be <exchange>_<timestamp>.gz
 	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, w.fileTimestamp)
-
-	// flush buffer
-	err = w.gwriter.Flush()
-	if err != nil {
-		return
-	}
-	err = w.writer.Flush()
-	if err != nil {
-		return
-	}
-
 	// try to upload it to s3
 	// creating new reader from original buffer array because if you read bytes from
 	// buffer, read bytes will be lost from buffer
@@ -241,13 +243,10 @@ func (w *Writer) Close(timestamp int64) (err error) {
 	if err != nil {
 		return
 	}
-	_, err = w.gwriter.Write([]byte(fmt.Sprintf("eos\t%d\n", timestamp)))
 	// report error as it is
-	serr := w.gwriter.Flush()
-	if serr != nil {
-		err = fmt.Errorf("error on flushing gzip: %v", serr)
-	}
-	serr = w.gwriter.Close()
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("eos\t%d\n", timestamp)))
+	// this will also flush buffer in gzip writer
+	serr := w.gwriter.Close()
 	if serr != nil {
 		if err != nil {
 			err = fmt.Errorf("error on closing gzip: %v, previous error was: %v", serr, err)
