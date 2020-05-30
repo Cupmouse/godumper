@@ -71,7 +71,10 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 		// prepare buffer writer
 		w.writer = bufio.NewWriter(w.buffer)
 		// prepare gzip writer
-		w.gwriter = gzip.NewWriter(w.writer)
+		w.gwriter, err = gzip.NewWriterLevel(w.writer, gzip.BestCompression)
+		if err != nil {
+			return
+		}
 
 		// write start line
 		startLine := fmt.Sprintf("start\t%d\t%s\n", timestamp, w.url)
@@ -99,7 +102,10 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 		w.buffer.Reset()
 		// don't have to do anything to writer
 		// prepare gzip writer
-		w.gwriter = gzip.NewWriter(w.writer)
+		w.gwriter, err = gzip.NewWriterLevel(w.writer, gzip.BestCompression)
+		if err != nil {
+			return
+		}
 
 		if minute%10 == 0 {
 			// if last digit of minute is 0 then write state snapshot
