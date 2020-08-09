@@ -1,21 +1,23 @@
-package subscriber
+package main
 
-type bitmexSubscriber struct {
-}
+type bitmexSubscriber struct{}
 
-func (d *bitmexSubscriber) URL() string {
+func (s *bitmexSubscriber) URL() string {
 	return "wss://www.bitmex.com/realtime?subscribe=announcement,chat,connected,funding,instrument,insurance,liquidation,orderBookL2,publicNotifications,settlement,trade"
 }
 
-func (d *bitmexSubscriber) BeforeConnection() error {
+func (s *bitmexSubscriber) BeforeConnection() error {
 	// nothing to prepare
 	return nil
 }
 
-func (d *bitmexSubscriber) Subscribe() (subscribes []Subscribe, err error) {
+func (s *bitmexSubscriber) AfterSubscribed() ([]queueElement, error) {
+	return nil, nil
+}
+
+func (s *bitmexSubscriber) Subscribe() ([][]byte, error) {
 	// nothing to return
-	subscribes = make([]Subscribe, 0)
-	return
+	return nil, nil
 }
 
 func newBitmexSubscriber() (subber *bitmexSubscriber) {

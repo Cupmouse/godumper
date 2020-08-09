@@ -1,4 +1,4 @@
-package writer
+package main
 
 import (
 	"bufio"
@@ -31,6 +31,7 @@ type Writer struct {
 	exchange      string
 	url           string
 	directory     string
+	alwaysDisk    bool
 	logger        *log.Logger
 	sim           simulator.Simulator
 }
@@ -133,19 +134,20 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 func (w *Writer) uploadOrStore() (err error) {
 	// name for file would be <exchange>_<timestamp>.gz
 	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, w.fileTimestamp)
-	// try to upload it to s3
-	// creating new reader from original buffer array because if you read bytes from
-	// buffer, read bytes will be lost from buffer
-	// we might use them later if s3 upload failed
-	err = streamcommons.PutS3Object(fileName, bytes.NewReader(w.buffer.Bytes()))
-	if err == nil {
-		// successful
-		w.logger.Println("uploaded to s3:", fileName)
-		return
+	if !w.alwaysDisk {
+		// try to upload it to s3
+		// creating new reader from original buffer array because if you read bytes from
+		// buffer, read bytes will be lost from buffer
+		// we might use them later if s3 upload failed
+		err = streamcommons.PutS3Object(fileName, bytes.NewReader(w.buffer.Bytes()))
+		if err == nil {
+			// successful
+			w.logger.Println("uploaded to s3:", fileName)
+			return
+		}
+		// if can not be uploaded to s3, then store it in local storage
+		w.logger.Printf("Could not be uploaded to s3: %v\n", err)
 	}
-
-	// if can not be uploaded to s3, then store it in local storage
-	w.logger.Printf("Could not be uploaded to s3: %v\n", err)
 	// make directories to store file
 	err = os.MkdirAll(w.directory, 0744)
 	if err != nil {
@@ -175,6 +177,33 @@ func (w *Writer) uploadOrStore() (err error) {
 	return
 }
 
+// MessageChannelKnown writes message line to writer, but the channel is already known.
+func (w *Writer) MessageChannelKnown(channel string, timestamp int64, message []byte) (err error) {
+	w.lock.Lock()
+	defer func() {
+		w.lock.Unlock()
+	}()
+	timestamp, err = w.beforeWrite(timestamp)
+	if err != nil {
+		return
+	}
+	err = w.sim.ProcessMessageChannelKnown(channel, message)
+	if err != nil {
+		return
+	}
+	// write message despite the error (if happened)
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("msg\t%d\t%s\t", timestamp, channel)))
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write(message)
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write([]byte("\n"))
+	return
+}
+
 // Message writes msg line to writer. Channel is automatically determined.
 func (w *Writer) Message(timestamp int64, message []byte) (err error) {
 	// mark this writer is locked so routines in other thread will wait
@@ -187,15 +216,27 @@ func (w *Writer) Message(timestamp int64, message []byte) (err error) {
 		return
 	}
 	var channel string
-	channel, err = w.sim.ProcessMessage(message)
-	if channel == "" || channel == simulator.ChannelUnknown {
+	channel, err = w.sim.ProcessMessageWebSocket(message)
+	if err != nil {
+		return
+	}
+	if channel == "" || channel == streamcommons.ChannelUnknown {
 		// simulator could not determine the channel of message
 		w.logger.Println("channel is unknown:", string(message))
 	}
 	// write message despite the error (if happened)
-	w.gwriter.Write([]byte(fmt.Sprintf("msg\t%d\t%s\t", timestamp, channel)))
-	w.gwriter.Write(message)
-	w.gwriter.Write([]byte("\n"))
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("msg\t%d\t%s\t", timestamp, channel)))
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write(message)
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write([]byte("\n"))
+	if err != nil {
+		return
+	}
 	return
 }
 
@@ -211,13 +252,19 @@ func (w *Writer) Send(timestamp int64, message []byte) (err error) {
 	}
 	var channel string
 	channel, err = w.sim.ProcessSend(message)
-	if channel == "" || channel == simulator.ChannelUnknown {
+	if channel == "" || channel == streamcommons.ChannelUnknown {
 		// simulator could not determine the channel of message
 		w.logger.Println("channel is unknown:", string(message))
 	}
-	w.gwriter.Write([]byte(fmt.Sprintf("send\t%d\t%s\t", timestamp, channel)))
-	w.gwriter.Write(message)
-	w.gwriter.Write([]byte("\n"))
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("send\t%d\t%s\t", timestamp, channel)))
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write(message)
+	if err != nil {
+		return
+	}
+	_, err = w.gwriter.Write([]byte("\n"))
 	return
 }
 
@@ -231,7 +278,7 @@ func (w *Writer) Error(timestamp int64, message []byte) (err error) {
 	if err != nil {
 		return
 	}
-	w.gwriter.Write([]byte(fmt.Sprintf("err\t%d\t%s\t\n", timestamp, message)))
+	_, err = w.gwriter.Write([]byte(fmt.Sprintf("err\t%d\t%s\t\n", timestamp, message)))
 	return
 }
 
@@ -283,11 +330,12 @@ func (w *Writer) Close(timestamp int64) (err error) {
 
 // NewWriter creates new writer according to exchange given and returns it
 // if error is reported, then there is no need to close returned writer
-func NewWriter(exchange string, url string, directory string, logger *log.Logger) (w *Writer, err error) {
+func NewWriter(exchange string, url string, directory string, alwaysDisk bool, logger *log.Logger) (w *Writer, err error) {
 	w = new(Writer)
 	w.exchange = exchange
 	w.url = url
 	w.directory = directory
+	w.alwaysDisk = alwaysDisk
 	w.sim, err = simulator.GetSimulator(exchange, nil)
 	w.logger = logger
 	return

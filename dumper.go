@@ -1,14 +1,13 @@
-package dumper
+package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"time"
 
-	"github.com/exchangedataset/godumper/subscriber"
-	"github.com/exchangedataset/godumper/writer"
 	"github.com/gorilla/websocket"
 )
 
@@ -19,31 +18,46 @@ const WriterQueueCapacity = 10000
 type queueMethod int
 
 const (
-	// MESSAGE method
-	MESSAGE = queueMethod(0)
-	// SEND method
-	SEND = queueMethod(1)
-	// ERROR method
-	ERROR = queueMethod(2)
+	// Message method
+	Message = queueMethod(0)
+	// MessageChannelKnown method
+	MessageChannelKnown = queueMethod(1)
+	// Send method
+	Send = queueMethod(2)
+	// Error method
+	Error = queueMethod(3)
 	// EOS method
-	EOS = queueMethod(3)
+	EOS = queueMethod(4)
 )
 
 type queueElement struct {
-	timestamp int64
+	timestamp time.Time
 	method    queueMethod
+	channel   string
 	message   []byte
 }
 
 // to stop writer thread, close queue channel.
 // error from errCh ensures the thread can be terminated
-func writerThread(conn *websocket.Conn, w *writer.Writer, queue chan queueElement, errCh chan error) {
+func writerThread(conn *websocket.Conn, w *Writer, queue chan queueElement, errCh chan error) {
 	var err error
 	defer func() {
 		if err != nil {
 			errCh <- err
 		}
 		close(errCh)
+	}()
+	defer func() {
+		if serr := recover(); serr != nil {
+			if serr != nil {
+				if err != nil {
+					err = fmt.Errorf("panic recovered: %v, original error was %v", err, serr)
+				} else {
+					err = fmt.Errorf("panic recovered: %v", serr)
+				}
+				debug.PrintStack()
+			}
+		}
 	}()
 	for {
 		elem, ok := <-queue
@@ -53,21 +67,18 @@ func writerThread(conn *websocket.Conn, w *writer.Writer, queue chan queueElemen
 		}
 		// there is an element in queue
 		switch elem.method {
-		case MESSAGE:
-			err = w.Message(elem.timestamp, elem.message)
-			break
-		case SEND:
-			err = w.Send(elem.timestamp, elem.message)
-			break
-		case ERROR:
-			err = w.Error(elem.timestamp, elem.message)
-			break
+		case MessageChannelKnown:
+			err = w.MessageChannelKnown(elem.channel, elem.timestamp.UnixNano(), elem.message)
+		case Message:
+			err = w.Message(elem.timestamp.UnixNano(), elem.message)
+		case Send:
+			err = w.Send(elem.timestamp.UnixNano(), elem.message)
+		case Error:
+			err = w.Error(elem.timestamp.UnixNano(), elem.message)
 		case EOS:
-			err = w.Close(elem.timestamp)
-			break
+			err = w.Close(elem.timestamp.UnixNano())
 		default:
 			err = errors.New("unknown queue element method")
-			return
 		}
 		if err != nil {
 			// send error through channel and leave
@@ -77,7 +88,7 @@ func writerThread(conn *websocket.Conn, w *writer.Writer, queue chan queueElemen
 }
 
 // returning error via channel ensures the thread can be terminated
-func subscribeThread(conn *websocket.Conn, subber subscriber.Subscriber, writer chan queueElement, stop chan bool, errCh chan error) {
+func subscribeThread(conn *websocket.Conn, subber Subscriber, writer chan queueElement, stop chan bool, errCh chan error) {
 	var err error
 	defer func() {
 		if err != nil {
@@ -85,7 +96,19 @@ func subscribeThread(conn *websocket.Conn, subber subscriber.Subscriber, writer 
 		}
 		close(errCh)
 	}()
-	var subscribes []subscriber.Subscribe
+	defer func() {
+		if serr := recover(); serr != nil {
+			if serr != nil {
+				if err != nil {
+					err = fmt.Errorf("panic recovered: %v, original error was %v", err, serr)
+				} else {
+					err = fmt.Errorf("panic recovered: %v", serr)
+				}
+				debug.PrintStack()
+			}
+		}
+	}()
+	var subscribes [][]byte
 	subscribes, err = subber.Subscribe()
 	if err != nil {
 		return
@@ -100,17 +123,24 @@ func subscribeThread(conn *websocket.Conn, subber subscriber.Subscriber, writer 
 			break
 		}
 
-		err = conn.WriteMessage(websocket.TextMessage, sub.Message)
+		err = conn.WriteMessage(websocket.TextMessage, sub)
 		if err != nil {
 			// report error and leave
 			return
 		}
-		now := time.Now().UnixNano()
-		writer <- queueElement{timestamp: now, method: SEND, message: sub.Message}
+		writer <- queueElement{timestamp: time.Now(), method: Send, message: sub}
+	}
+	// Do AfterSubscribed
+	messages, err := subber.AfterSubscribed()
+	if err != nil {
+		return
+	}
+	for _, msg := range messages {
+		writer <- msg
 	}
 }
 
-func readThread(conn *websocket.Conn, subber subscriber.Subscriber, writer chan queueElement, errCh chan error) {
+func readThread(conn *websocket.Conn, subber Subscriber, writer chan queueElement, errCh chan error) {
 	var err error
 	defer func() {
 		// this defer function will take care of sending errCh an error from err variable
@@ -120,12 +150,24 @@ func readThread(conn *websocket.Conn, subber subscriber.Subscriber, writer chan 
 		}
 		close(errCh)
 	}()
+	defer func() {
+		if serr := recover(); serr != nil {
+			if serr != nil {
+				if err != nil {
+					err = fmt.Errorf("panic recovered: %v, original error was %v", err, serr)
+				} else {
+					err = fmt.Errorf("panic recovered: %v", serr)
+				}
+				debug.PrintStack()
+			}
+		}
+	}()
 
 	for {
 		var messageType int
 		var message []byte
 		messageType, message, err = conn.ReadMessage()
-		now := time.Now().UnixNano()
+		now := time.Now()
 		if err != nil {
 			return
 		}
@@ -135,12 +177,12 @@ func readThread(conn *websocket.Conn, subber subscriber.Subscriber, writer chan 
 		}
 
 		// keep in mind this could be block-ed if channel is overflown
-		writer <- queueElement{timestamp: now, method: MESSAGE, message: message}
+		writer <- queueElement{timestamp: now, method: Message, message: message}
 	}
 }
 
 // Dump establish connection to the server and dumps WebSocket message
-func Dump(exchange string, directory string, logger *log.Logger, errCh chan error, stop chan bool) {
+func Dump(exchange string, directory string, logger *log.Logger, alwaysDisk bool, errCh chan error, stop chan bool) {
 	defer func() {
 		close(errCh)
 	}()
@@ -157,18 +199,19 @@ func Dump(exchange string, directory string, logger *log.Logger, errCh chan erro
 			} else {
 				err = fmt.Errorf("panic occurred: %v", perr)
 			}
+			debug.PrintStack()
 		}
 	}()
 
-	var subber subscriber.Subscriber
-	subber, err = subscriber.GetSubscriber(exchange, logger)
+	var subber Subscriber
+	subber, err = GetSubscriber(exchange, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
 
 	// prepare writer
-	var w *writer.Writer
-	w, err = writer.NewWriter(exchange, subber.URL(), directory, logger)
+	var w *Writer
+	w, err = NewWriter(exchange, subber.URL(), directory, alwaysDisk, logger)
 	if err != nil {
 		return
 	}
@@ -186,7 +229,10 @@ func Dump(exchange string, directory string, logger *log.Logger, errCh chan erro
 
 	// call subscriber.BeforeConnection
 	logger.Println("Performing before connection")
-	subber.BeforeConnection()
+	err = subber.BeforeConnection()
+	if err != nil {
+		return
+	}
 
 	// connect to the WebSocket server
 	dialer := websocket.Dialer{

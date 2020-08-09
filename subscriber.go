@@ -1,15 +1,9 @@
-package subscriber
+package main
 
 import (
 	"fmt"
 	"log"
 )
-
-// Subscribe is a pair of channel and subscribe request message
-type Subscribe struct {
-	Channel string
-	Message []byte
-}
 
 // Subscriber does subscription for dumper
 type Subscriber interface {
@@ -19,7 +13,9 @@ type Subscriber interface {
 	// so it could pick what channel to subscribe.
 	BeforeConnection() error
 	// Subscribe returns subscribe request message
-	Subscribe() ([]Subscribe, error)
+	Subscribe() ([][]byte, error)
+	// Called after subscribe requests are sent
+	AfterSubscribed() ([]queueElement, error)
 }
 
 // GetSubscriber returns the right subscriber for specified exchange
@@ -33,6 +29,9 @@ func GetSubscriber(exchange string, logger *log.Logger) (subscriber Subscriber, 
 		break
 	case "bitflyer":
 		subscriber = newBitflyerSubscriber()
+		break
+	case "binance":
+		subscriber = newBinanceSubscriber(logger)
 		break
 	default:
 		err = fmt.Errorf("dumper for exchange %s is not supported", exchange)

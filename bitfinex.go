@@ -1,4 +1,4 @@
-package subscriber
+package main
 
 import (
 	"encoding/json"
@@ -21,7 +21,7 @@ type bitfinexSubscriber struct {
 	logger       *log.Logger
 }
 
-type bitfinexTickerTrade struct {
+type bitfinexTicker struct {
 	Symbol              string
 	Bid                 float64
 	BidSize             float64
@@ -37,22 +37,25 @@ type bitfinexTickerTrade struct {
 	USDVolume float64
 }
 
-type bitmexTickerTrades []bitfinexTickerTrade
+type bitmexTickers []bitfinexTicker
 
-func (a bitmexTickerTrades) Len() int           { return len(a) }
-func (a bitmexTickerTrades) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a bitmexTickerTrades) Less(i, j int) bool { return a[i].USDVolume < a[j].USDVolume }
+func (a bitmexTickers) Len() int           { return len(a) }
+func (a bitmexTickers) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a bitmexTickers) Less(i, j int) bool { return a[i].USDVolume < a[j].USDVolume }
 
-func (d *bitfinexSubscriber) URL() string {
+func (s *bitfinexSubscriber) URL() string {
 	return "wss://api-pub.bitfinex.com/ws/2"
 }
 
-func (d *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, err error) {
-	// before start dumping, bitfinex has too much currencies so it has channel limitation
-	// we must cherry pick the best one to observe its trade
-	// we can determine this by retrieving trading volumes for each symbol and pick coins which volume is in the most
+func (s *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, err error) {
+	// Before start dumping, bitfinex has too much currencies so it has channel limitation
+	// We must cherry pick the best one to observe its trade
+	// We can determine this by retrieving trading volumes for each symbol and pick coins which volume is in the most
 	var res *http.Response
 	res, err = http.Get("https://api.bitfinex.com/v2/tickers?symbols=ALL")
+	if err != nil {
+		return
+	}
 	defer func() {
 		serr := res.Body.Close()
 		if serr != nil {
@@ -63,33 +66,27 @@ func (d *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, 
 			}
 		}
 	}()
-	if err != nil {
-		return
+	resBytes, serr := ioutil.ReadAll(res.Body)
+	if serr != nil {
+		return nil, serr
 	}
-
-	var resBytes []byte
-	resBytes, err = ioutil.ReadAll(res.Body)
-
-	// this is to store tickers for all symbols including trade and funding
+	// This is to store tickers for all symbols including trade and funding
 	tickersAll := make([]interface{}, 0, 1000)
 	err = json.Unmarshal(resBytes, &tickersAll)
 	if err != nil {
 		return
 	}
-
-	// take only normal exchange symbol which starts from 't', not funding symbol, 'f'
-	// symbol name is located at index 0
-	tickersTrade := make(bitmexTickerTrades, 0, 500)
+	// Take only normal exchange symbol which starts from 't', not funding symbol, 'f'
+	// Symbol name is located at index 0
+	tickersTrade := make(bitmexTickers, 0, 500)
 	for _, tickerInterf := range tickersAll {
 		ticker := tickerInterf.([]interface{})
 		symbol := ticker[0].(string)
-
-		// ignore other than trade channels
+		// Ignore other than trade channels
 		if !strings.HasPrefix(symbol, "t") {
 			break
 		}
-
-		tickersTrade = append(tickersTrade, bitfinexTickerTrade{
+		tickersTrade = append(tickersTrade, bitfinexTicker{
 			Symbol:              ticker[0].(string),
 			Bid:                 ticker[1].(float64),
 			BidSize:             ticker[2].(float64),
@@ -103,37 +100,32 @@ func (d *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, 
 			Low:                 ticker[10].(float64),
 		})
 	}
-
-	// volume is NOT in USD, example, tETHBTC volume is in BTC
-	// must convert it to USD in order to sort them by USD volume
-	// for this, let's make a price table
-	// last price are located at index 7
+	// Volume is NOT in USD, example, tETHBTC volume is in BTC
+	// Must convert it to USD in order to sort them by USD volume
+	// For this, let's make a price table
+	// Last price are located at index 7
 	priceTable := make(map[string]float64)
 	for _, ticker := range tickersTrade {
 		priceTable[ticker.Symbol] = ticker.LastPrice
 	}
-
-	// convert raw volume to USD volume
+	// Convert raw volume to USD volume
 	// tXXXYYY (volume in XXX, price in YYY)
-	// if tXXXUSD exist, then volume is (volume of tXXXYYY) * (price of tXXXUSD)
+	// If tXXXUSD exist, then volume is (volume of tXXXYYY) * (price of tXXXUSD)
 	for _, ticker := range tickersTrade {
 		// take XXX of tXXXYYY
 		pairBase := ticker.Symbol[1:4]
-
 		usdPrice, ok := priceTable[fmt.Sprintf("t%sUSD", pairBase)]
 		if ok {
 			// (raw volume) * (usd price in usd) = volume in usd
 			ticker.USDVolume = ticker.Volume * usdPrice
 		} else {
-			d.logger.Println("could not find proper market to calculate volume for symbol:", ticker.Symbol)
+			s.logger.Println("could not find proper market to calculate volume for symbol:", ticker.Symbol)
 		}
 	}
-
-	// sort slice by USD volume
-	// note it requires reverse option, since we are looking for symbols
-	// which have the most largest volume
+	// Sort slice by USD volume
+	// Note it requires reverse option, since we are looking for symbols
+	// Which have the most largest volume
 	sort.Sort(sort.Reverse(tickersTrade))
-
 	symbols = make([]string, len(tickersTrade))
 	for i, ticker := range tickersTrade {
 		symbols[i] = ticker.Symbol
@@ -141,77 +133,69 @@ func (d *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, 
 	return
 }
 
-func (d *bitfinexSubscriber) BeforeConnection() (err error) {
-	var allMarkets []string
-	allMarkets, err = d.fetchMarketsSortedByUSDVolume()
-	if err != nil {
-		return
+func (s *bitfinexSubscriber) BeforeConnection() error {
+	allMarkets, serr := s.fetchMarketsSortedByUSDVolume()
+	if serr != nil {
+		return serr
 	}
-
 	markets := append(bitfinexPrioritySymbols, allMarkets...)
-
-	// pick up certain amount of unique symbols from markets
-	d.tradeSymbols = make([]string, bitfinexMaximumChannel/2)
+	// Pick up certain amount of unique symbols from markets
+	s.tradeSymbols = make([]string, bitfinexMaximumChannel/2)
 	appeared := make(map[string]bool)
 	i := 0
 	for _, symbol := range markets {
 		if i >= bitfinexMaximumChannel/2 {
-			return
+			return nil
 		}
 		_, ok := appeared[symbol]
 		if !ok {
 			// unique market
-			d.tradeSymbols[i] = symbol
+			s.tradeSymbols[i] = symbol
 			appeared[symbol] = true
 			i++
 		}
 	}
-	return
+	return nil
 }
 
-func (d *bitfinexSubscriber) Subscribe() (subscribes []Subscribe, err error) {
-	subscribes = make([]Subscribe, 0, 100)
+func (s *bitfinexSubscriber) AfterSubscribed() ([]queueElement, error) {
+	return nil, nil
+}
 
+func (s *bitfinexSubscriber) Subscribe() ([][]byte, error) {
+	subscribes := make([][]byte, 0, 100)
 	subscribe := new(jsonstructs.BitfinexSubscribe)
 	subscribe.Initialize()
-
 	// Subscribe to trades channel
 	subscribe.Channel = "trades"
-
-	for _, symbol := range d.tradeSymbols {
+	for _, symbol := range s.tradeSymbols {
 		subscribe.Symbol = symbol
-		var marshaled []byte
-		marshaled, err = json.Marshal(subscribe)
-		if err != nil {
-			return
+		marshaled, serr := json.Marshal(subscribe)
+		if serr != nil {
+			return nil, fmt.Errorf("subscribe marshal: %v", serr)
 		}
-		channel := fmt.Sprintf("%s_%s", subscribe.Channel, symbol)
-		subscribes = append(subscribes, Subscribe{Channel: channel, Message: marshaled})
+		subscribes = append(subscribes, marshaled)
 	}
-
-	// subscribe to book channel
+	// Subscribe to book channel
 	subscribe.Channel = "book"
-	// set precision to raw
+	// Set precision to raw
 	prec := "P0"
 	subscribe.Prec = &prec
-	// set frequency to the most frequent == realtime
+	// Set frequency to the most frequent == realtime
 	frec := "F0"
 	subscribe.Frec = &frec
-	// set limit to a big number
+	// Set limit to a big number
 	len := "100"
 	subscribe.Len = &len
-
-	for _, symbol := range d.tradeSymbols {
+	for _, symbol := range s.tradeSymbols {
 		subscribe.Symbol = symbol
-		channel := fmt.Sprintf("%s_%s", subscribe.Channel, symbol)
-		var marshaled []byte
-		marshaled, err = json.Marshal(subscribe)
-		if err != nil {
-			return
+		marshaled, serr := json.Marshal(subscribe)
+		if serr != nil {
+			return nil, fmt.Errorf("subscribe marshal: %v", serr)
 		}
-		subscribes = append(subscribes, Subscribe{Channel: channel, Message: marshaled})
+		subscribes = append(subscribes, marshaled)
 	}
-	return
+	return subscribes, nil
 }
 
 func newBitfinexSubscriber(logger *log.Logger) (subber *bitfinexSubscriber) {

@@ -1,4 +1,4 @@
-package subscriber
+package main
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"github.com/exchangedataset/streamcommons/jsonstructs"
 )
 
-var bitflyerChannelPrefixes = [...]string{
+var bitflyerChannelPrefixes = []string{
 	"lightning_executions_",
 	"lightning_board_snapshot_",
 	"lightning_board_",
@@ -24,11 +24,11 @@ type bitflyerMarketsElement struct {
 	ProductCode string `json:"product_code"`
 }
 
-func (d *bitflyerSubscriber) URL() string {
+func (s *bitflyerSubscriber) URL() string {
 	return "wss://ws.lightstream.bitflyer.com/json-rpc"
 }
 
-func (d *bitflyerSubscriber) BeforeConnection() (err error) {
+func (s *bitflyerSubscriber) BeforeConnection() (err error) {
 	// fetch what markets they have
 	var res *http.Response
 	res, err = http.Get("https://api.bitflyer.com/v1/markets")
@@ -60,35 +60,38 @@ func (d *bitflyerSubscriber) BeforeConnection() (err error) {
 
 	// response have the format of [{'product_code':'BTC_JPY'},{...}...]
 	// produce an array of product_code
-	d.productCodes = make([]string, len(markets))
+	s.productCodes = make([]string, len(markets))
 	for i, market := range markets {
-		d.productCodes[i] = market.ProductCode
+		s.productCodes[i] = market.ProductCode
 	}
 	return
 }
 
-func (d *bitflyerSubscriber) Subscribe() (subscribes []Subscribe, err error) {
-	subscribes = make([]Subscribe, 0, 100)
+func (s *bitflyerSubscriber) AfterSubscribed() ([]queueElement, error) {
+	return nil, nil
+}
+
+func (s *bitflyerSubscriber) Subscribe() ([][]byte, error) {
+	subscribes := make([][]byte, 0, 100)
 
 	subscribe := new(jsonstructs.BitflyerSubscribe)
 	subscribe.Initialize()
 
 	i := 0
-	for _, productCode := range d.productCodes {
+	for _, productCode := range s.productCodes {
 		for _, prefix := range bitflyerChannelPrefixes {
 			subscribe.ID = i
 			channel := prefix + productCode
 			subscribe.Params.Channel = channel
-			var subscribeMessage []byte
-			subscribeMessage, err = json.Marshal(subscribe)
-			if err != nil {
-				return
+			subscribeMessage, serr := json.Marshal(subscribe)
+			if serr != nil {
+				return nil, serr
 			}
-			subscribes = append(subscribes, Subscribe{Channel: channel, Message: subscribeMessage})
+			subscribes = append(subscribes, subscribeMessage)
 			i++
 		}
 	}
-	return
+	return subscribes, nil
 }
 
 func newBitflyerSubscriber() (subber *bitflyerSubscriber) {

@@ -1,14 +1,14 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/exchangedataset/godumper/dumper"
 )
 
 // RapidRestartThreshold is the time threshold that if dumper has restarted within this period of time
@@ -21,15 +21,15 @@ const RapidRestartThreshold = 60 * time.Second
 const RestartWaitTimeLimit = 60 * time.Second
 
 func main() {
-	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
-
-	if len(os.Args) < 3 {
-		logger.Fatal("please specify an exchange, and directory")
+	exchange := flag.String("exchange", "", "a name of target exchange")
+	directory := flag.String("directory", "./dumpfiles", "path to the directory to store dumps")
+	alwaysDisk := flag.Bool("disk", true, "always store dumps as file")
+	flag.Parse()
+	if *exchange == "" {
+		fmt.Fprintln(os.Stderr, "Specify an exchange")
+		os.Exit(1)
 	}
-
-	// choose dumper for the exchange provided
-	exchange := os.Args[1]
-	directory := os.Args[2]
+	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
 
 	// main loop to endlessly dump
 	recentRestartCount := 0
@@ -47,7 +47,7 @@ func main() {
 		// buffering one is important
 		// this will ensure sending to this channel won't block main loop
 		stop := make(chan bool, 1)
-		go dumper.Dump(exchange, directory, logger, errCh, stop)
+		go Dump(*exchange, *directory, logger, *alwaysDisk, errCh, stop)
 
 		select {
 		case dumpErr := <-errCh:
