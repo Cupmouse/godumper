@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -19,8 +20,8 @@ import (
 // WriterBufferSize is the size of dataset buffer, 5MB
 const WriterBufferSize = 5 * 1024 * 1024
 
-// Writer writes messages to gzipped file
-type Writer struct {
+// writer writes messages to gzipped file
+type writer struct {
 	closed        bool
 	lastTimestamp int64
 	lock          sync.Mutex
@@ -36,7 +37,7 @@ type Writer struct {
 	sim           simulator.Simulator
 }
 
-func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err error) {
+func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err error) {
 	if w.closed {
 		err = errors.New("tried to write to an already closed writer")
 		return
@@ -131,7 +132,7 @@ func (w *Writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 // this method assumes contents in buffer are complete
 // this means it does not perform flush or closing gzip writer
 // before writing the contents of buffer
-func (w *Writer) uploadOrStore() (err error) {
+func (w *writer) uploadOrStore() (err error) {
 	// name for file would be <exchange>_<timestamp>.gz
 	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, w.fileTimestamp)
 	if !w.alwaysDisk {
@@ -178,7 +179,7 @@ func (w *Writer) uploadOrStore() (err error) {
 }
 
 // MessageChannelKnown writes message line to writer, but the channel is already known.
-func (w *Writer) MessageChannelKnown(channel string, timestamp int64, message []byte) (err error) {
+func (w *writer) MessageChannelKnown(channel string, timestamp int64, message []byte) (err error) {
 	w.lock.Lock()
 	defer func() {
 		w.lock.Unlock()
@@ -205,7 +206,7 @@ func (w *Writer) MessageChannelKnown(channel string, timestamp int64, message []
 }
 
 // Message writes msg line to writer. Channel is automatically determined.
-func (w *Writer) Message(timestamp int64, message []byte) (err error) {
+func (w *writer) Message(timestamp int64, message []byte) (err error) {
 	// mark this writer is locked so routines in other thread will wait
 	w.lock.Lock()
 	defer func() {
@@ -241,7 +242,7 @@ func (w *Writer) Message(timestamp int64, message []byte) (err error) {
 }
 
 // Send writes send line to writer. Channel is automatically determined.
-func (w *Writer) Send(timestamp int64, message []byte) (err error) {
+func (w *writer) Send(timestamp int64, message []byte) (err error) {
 	w.lock.Lock()
 	defer func() {
 		w.lock.Unlock()
@@ -269,7 +270,7 @@ func (w *Writer) Send(timestamp int64, message []byte) (err error) {
 }
 
 // Error writes err line to writer.
-func (w *Writer) Error(timestamp int64, message []byte) (err error) {
+func (w *writer) Error(timestamp int64, message []byte) (err error) {
 	w.lock.Lock()
 	defer func() {
 		w.lock.Unlock()
@@ -283,7 +284,7 @@ func (w *Writer) Error(timestamp int64, message []byte) (err error) {
 }
 
 // Close closes this writer and underlying file and gzip writer. It also writes end line.
-func (w *Writer) Close(timestamp int64) (err error) {
+func (w *writer) Close(timestamp int64) (err error) {
 	w.lock.Lock()
 	defer func() {
 		w.lock.Unlock()
@@ -328,10 +329,10 @@ func (w *Writer) Close(timestamp int64) (err error) {
 	return
 }
 
-// NewWriter creates new writer according to exchange given and returns it
-// if error is reported, then there is no need to close returned writer
-func NewWriter(exchange string, url string, directory string, alwaysDisk bool, logger *log.Logger) (w *Writer, err error) {
-	w = new(Writer)
+// newWriter creates new writer according to the exchange given and returns it.
+// If an error is reported, returned writer do not have to be closed.
+func newWriter(exchange string, url string, directory string, alwaysDisk bool, logger *log.Logger) (w *writer, err error) {
+	w = new(writer)
 	w.exchange = exchange
 	w.url = url
 	w.directory = directory
@@ -339,4 +340,121 @@ func NewWriter(exchange string, url string, directory string, alwaysDisk bool, l
 	w.sim, err = simulator.GetSimulator(exchange, nil)
 	w.logger = logger
 	return
+}
+
+// WriterQueueMethod is the enum-ized writer functions
+type WriterQueueMethod int
+
+const (
+	// WriteMessage method
+	WriteMessage = WriterQueueMethod(0)
+	// WriteMessageChannelKnown method
+	WriteMessageChannelKnown = WriterQueueMethod(1)
+	// WriteSend method
+	WriteSend = WriterQueueMethod(2)
+	// WriteError method
+	WriteError = WriterQueueMethod(3)
+	// WriteEOS method
+	WriteEOS = WriterQueueMethod(4)
+)
+
+// WriterQueueCapacity is the maximum capacity of the queue for a writer thread.
+// If incoming message exceeded this capacity, then the caller would be blocked.
+const WriterQueueCapacity = 10000
+
+// WriterQueueElement is element of writer queue.
+type WriterQueueElement struct {
+	timestamp time.Time
+	method    WriterQueueMethod
+	channel   string
+	message   []byte
+}
+
+// writerRoutine houses a writer and accepts command for it.
+// This is intended to be run on another goroutine.
+// To stop writer thread, close queue channel.
+func writerRoutine(exchange string, us string, directory string, alwaysDisk bool,
+	logger *log.Logger, queue chan WriterQueueElement, errc chan error) {
+	var err error
+	defer func() {
+		if err != nil {
+			errc <- err
+		}
+		close(errc)
+	}()
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			if err != nil {
+				err = fmt.Errorf("recover: %v, originally: %v", rec, err)
+			} else {
+				err = fmt.Errorf("recover: %v", rec)
+			}
+			logger.Printf("%s", debug.Stack())
+		}
+	}()
+	w, serr := newWriter(exchange, us, directory, alwaysDisk, logger)
+	defer func() {
+		serr := w.Close(time.Now().UnixNano())
+		if serr != nil {
+			if err != nil {
+				err = fmt.Errorf("close: %v", serr)
+			} else {
+				err = fmt.Errorf("close: %v", serr)
+			}
+		}
+	}()
+	if serr != nil {
+		err = serr
+		return
+	}
+	for {
+		// Writer to a writer as long as queue is not closed
+		elem, ok := <-queue
+		if !ok {
+			// Queue channel is closed, stop this thread
+			return
+		}
+		var serr error
+		switch elem.method {
+		case WriteMessageChannelKnown:
+			serr = w.MessageChannelKnown(elem.channel, elem.timestamp.UnixNano(), elem.message)
+		case WriteMessage:
+			serr = w.Message(elem.timestamp.UnixNano(), elem.message)
+		case WriteSend:
+			serr = w.Send(elem.timestamp.UnixNano(), elem.message)
+		case WriteError:
+			serr = w.Error(elem.timestamp.UnixNano(), elem.message)
+		case WriteEOS:
+			serr = w.Close(elem.timestamp.UnixNano())
+		default:
+			serr = errors.New("unknown queue element method")
+		}
+		if serr != nil {
+			// send error through channel and leave
+			err = serr
+			return
+		}
+	}
+}
+
+// Writer is the concurrent version of writer.
+type Writer struct {
+	queue      chan WriterQueueElement
+	errc       chan error
+	exchange   string
+	urlStr     string
+	directory  string
+	alwaysDisk bool
+	logger     *log.Logger
+}
+
+// NewWriter creates and returns new concurrent writer.
+// A writer routine can be stopped by closing `chan WriterQueueElement`.
+func NewWriter(exchange string, us string, directory string, alwaysDisk bool, logger *log.Logger, queueSize int) *Writer {
+	w := new(Writer)
+	w.queue = make(chan WriterQueueElement, queueSize)
+	w.errc = make(chan error)
+	go writerRoutine(exchange, us, directory, alwaysDisk, logger, queue, writerErr)
+	return queue, writerErr
 }

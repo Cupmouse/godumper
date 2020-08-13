@@ -1,26 +1,53 @@
 package main
 
-type bitmexSubscriber struct{}
+import (
+	"log"
+	"net/url"
+)
 
-func (s *bitmexSubscriber) URL() string {
-	return "wss://www.bitmex.com/realtime?subscribe=announcement,chat,connected,funding,instrument,insurance,liquidation,orderBookL2,publicNotifications,settlement,trade"
+var bitmexChannels = []string{
+	"announcement",
+	"chat",
+	"connected",
+	"funding",
+	"instrument",
+	"insurance",
+	"liquidation",
+	"orderBookL2",
+	"publicNotifications",
+	"settlement",
+	"trade",
 }
 
-func (s *bitmexSubscriber) BeforeConnection() error {
-	// nothing to prepare
+type bitmexDump struct {
+}
+
+func (d *bitmexDump) Subscribe() ([][]byte, error) {
+	return nil, nil
+}
+func (d *bitmexDump) BeforeConnect() error {
 	return nil
 }
 
-func (s *bitmexSubscriber) AfterSubscribed() ([]queueElement, error) {
-	return nil, nil
-}
+func dumpBitmex(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
+	defer close(errc)
+	var err error
+	defer func() {
+		if err != nil {
+			errc <- err
+		}
+	}()
+	u, serr := url.Parse("wss://www.bitmex.com/realtime")
+	if serr != nil {
+		err = serr
+		return
+	}
+	q := u.Query()
+	for _, ch := range bitmexChannels {
+		q.Add("subscribe", ch)
+	}
+	u.RawQuery = q.Encode()
 
-func (s *bitmexSubscriber) Subscribe() ([][]byte, error) {
-	// nothing to return
-	return nil, nil
-}
-
-func newBitmexSubscriber() (subber *bitmexSubscriber) {
-	subber = new(bitmexSubscriber)
+	err = dumpNormal("bitmex", u.String(), directory, alwaysDisk, logger, &bitmexDump{}, stop)
 	return
 }

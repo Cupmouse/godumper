@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 
 	"github.com/exchangedataset/streamcommons/jsonstructs"
@@ -16,22 +17,9 @@ var bitflyerChannelPrefixes = []string{
 	"lightning_ticker_",
 }
 
-type bitflyerSubscriber struct {
-	productCodes []string
-}
-
-type bitflyerMarketsElement struct {
-	ProductCode string `json:"product_code"`
-}
-
-func (s *bitflyerSubscriber) URL() string {
-	return "wss://ws.lightstream.bitflyer.com/json-rpc"
-}
-
-func (s *bitflyerSubscriber) BeforeConnection() (err error) {
-	// fetch what markets they have
-	var res *http.Response
-	res, err = http.Get("https://api.bitflyer.com/v1/markets")
+func bitflyerFetchMarkets() (productCodes []string, err error) {
+	// Fetch what markets they have
+	res, err := http.Get("https://api.bitflyer.com/v1/markets")
 	defer func() {
 		serr := res.Body.Close()
 		if serr != nil {
@@ -45,56 +33,68 @@ func (s *bitflyerSubscriber) BeforeConnection() (err error) {
 	if err != nil {
 		return
 	}
-
 	var resBytes []byte
 	resBytes, err = ioutil.ReadAll(res.Body)
 	if err != nil {
 		return
 	}
-
-	markets := make([]bitflyerMarketsElement, 0, 100)
+	markets := make([]struct {
+		ProductCode string `json:"product_code"`
+	}, 0, 100)
 	err = json.Unmarshal(resBytes, &markets)
 	if err != nil {
 		return
 	}
-
-	// response have the format of [{'product_code':'BTC_JPY'},{...}...]
-	// produce an array of product_code
-	s.productCodes = make([]string, len(markets))
+	// Response have the format of [{'product_code':'BTC_JPY'},{...}...]
+	// Produce an array of product_code
+	productCodes = make([]string, len(markets))
 	for i, market := range markets {
-		s.productCodes[i] = market.ProductCode
+		productCodes[i] = market.ProductCode
 	}
 	return
 }
 
-func (s *bitflyerSubscriber) AfterSubscribed() ([]queueElement, error) {
-	return nil, nil
+type bitflyerDump struct {
+	productCodes []string
 }
 
-func (s *bitflyerSubscriber) Subscribe() ([][]byte, error) {
-	subscribes := make([][]byte, 0, 100)
-
-	subscribe := new(jsonstructs.BitflyerSubscribe)
-	subscribe.Initialize()
-
+func (d *bitflyerDump) Subscribe() ([][]byte, error) {
+	subs := make([][]byte, 0, 100)
+	substruct := new(jsonstructs.BitflyerSubscribe)
+	substruct.Initialize()
 	i := 0
-	for _, productCode := range s.productCodes {
+	for _, productCode := range d.productCodes {
 		for _, prefix := range bitflyerChannelPrefixes {
-			subscribe.ID = i
+			substruct.ID = i
 			channel := prefix + productCode
-			subscribe.Params.Channel = channel
-			subscribeMessage, serr := json.Marshal(subscribe)
+			substruct.Params.Channel = channel
+			subMarshaled, serr := json.Marshal(substruct)
 			if serr != nil {
 				return nil, serr
 			}
-			subscribes = append(subscribes, subscribeMessage)
+			subs = append(subs, subMarshaled)
 			i++
 		}
 	}
-	return subscribes, nil
+	return subs, nil
+}
+func (d *bitflyerDump) BeforeConnect() error {
+	var serr error
+	d.productCodes, serr = bitflyerFetchMarkets()
+	if serr != nil {
+		return fmt.Errorf("fetch markets: %v", serr)
+	}
+	return nil
 }
 
-func newBitflyerSubscriber() (subber *bitflyerSubscriber) {
-	subber = new(bitflyerSubscriber)
+func dumpBitflyer(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
+	defer close(errc)
+	var err error
+	defer func() {
+		if err != nil {
+			errc <- err
+		}
+	}()
+	err = dumpNormal("bitflyer", "wss://ws.lightstream.bitflyer.com/json-rpc", directory, alwaysDisk, logger, &bitflyerDump{}, stop)
 	return
 }

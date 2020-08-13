@@ -43,11 +43,12 @@ func (a bitmexTickers) Len() int           { return len(a) }
 func (a bitmexTickers) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a bitmexTickers) Less(i, j int) bool { return a[i].USDVolume < a[j].USDVolume }
 
-func (s *bitfinexSubscriber) URL() string {
-	return "wss://api-pub.bitfinex.com/ws/2"
+type bitfinexDump struct {
+	tradeSymbols []string
+	logger       *log.Logger
 }
 
-func (s *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, err error) {
+func (d *bitfinexDump) FetchMarkets() (symbols []string, err error) {
 	// Before start dumping, bitfinex has too much currencies so it has channel limitation
 	// We must cherry pick the best one to observe its trade
 	// We can determine this by retrieving trading volumes for each symbol and pick coins which volume is in the most
@@ -119,7 +120,7 @@ func (s *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, 
 			// (raw volume) * (usd price in usd) = volume in usd
 			ticker.USDVolume = ticker.Volume * usdPrice
 		} else {
-			s.logger.Println("could not find proper market to calculate volume for symbol:", ticker.Symbol)
+			d.logger.Println("could not find proper market to calculate volume for symbol:", ticker.Symbol)
 		}
 	}
 	// Sort slice by USD volume
@@ -133,42 +134,13 @@ func (s *bitfinexSubscriber) fetchMarketsSortedByUSDVolume() (symbols []string, 
 	return
 }
 
-func (s *bitfinexSubscriber) BeforeConnection() error {
-	allMarkets, serr := s.fetchMarketsSortedByUSDVolume()
-	if serr != nil {
-		return serr
-	}
-	markets := append(bitfinexPrioritySymbols, allMarkets...)
-	// Pick up certain amount of unique symbols from markets
-	s.tradeSymbols = make([]string, bitfinexMaximumChannel/2)
-	appeared := make(map[string]bool)
-	i := 0
-	for _, symbol := range markets {
-		if i >= bitfinexMaximumChannel/2 {
-			return nil
-		}
-		_, ok := appeared[symbol]
-		if !ok {
-			// unique market
-			s.tradeSymbols[i] = symbol
-			appeared[symbol] = true
-			i++
-		}
-	}
-	return nil
-}
-
-func (s *bitfinexSubscriber) AfterSubscribed() ([]queueElement, error) {
-	return nil, nil
-}
-
-func (s *bitfinexSubscriber) Subscribe() ([][]byte, error) {
+func (d *bitfinexDump) Subscribe() ([][]byte, error) {
 	subscribes := make([][]byte, 0, 100)
 	subscribe := new(jsonstructs.BitfinexSubscribe)
 	subscribe.Initialize()
 	// Subscribe to trades channel
 	subscribe.Channel = "trades"
-	for _, symbol := range s.tradeSymbols {
+	for _, symbol := range d.tradeSymbols {
 		subscribe.Symbol = symbol
 		marshaled, serr := json.Marshal(subscribe)
 		if serr != nil {
@@ -187,7 +159,7 @@ func (s *bitfinexSubscriber) Subscribe() ([][]byte, error) {
 	// Set limit to a big number
 	len := "100"
 	subscribe.Len = &len
-	for _, symbol := range s.tradeSymbols {
+	for _, symbol := range d.tradeSymbols {
 		subscribe.Symbol = symbol
 		marshaled, serr := json.Marshal(subscribe)
 		if serr != nil {
@@ -197,9 +169,39 @@ func (s *bitfinexSubscriber) Subscribe() ([][]byte, error) {
 	}
 	return subscribes, nil
 }
+func (d *bitfinexDump) BeforeConnect() error {
+	allMarkets, serr := d.FetchMarkets()
+	if serr != nil {
+		return serr
+	}
+	markets := append(bitfinexPrioritySymbols, allMarkets...)
+	// Pick up certain amount of unique symbols from markets
+	d.tradeSymbols = make([]string, bitfinexMaximumChannel/2)
+	appeared := make(map[string]bool)
+	i := 0
+	for _, symbol := range markets {
+		if i >= bitfinexMaximumChannel/2 {
+			return nil
+		}
+		_, ok := appeared[symbol]
+		if !ok {
+			// unique market
+			d.tradeSymbols[i] = symbol
+			appeared[symbol] = true
+			i++
+		}
+	}
+	return nil
+}
 
-func newBitfinexSubscriber(logger *log.Logger) (subber *bitfinexSubscriber) {
-	subber = new(bitfinexSubscriber)
-	subber.logger = logger
+func dumpBitfinex(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
+	defer close(errc)
+	var err error
+	defer func() {
+		if err != nil {
+			errc <- err
+		}
+	}()
+	err = dumpNormal("bitfinex", "wss://api-pub.bitfinex.com/ws/2", directory, alwaysDisk, logger, &bitfinexDump{logger: logger}, stop)
 	return
 }

@@ -25,11 +25,22 @@ func main() {
 	directory := flag.String("directory", "./dumpfiles", "path to the directory to store dumps")
 	alwaysDisk := flag.Bool("disk", true, "always store dumps as file")
 	flag.Parse()
-	if *exchange == "" {
+	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
+
+	var dumpFunc func(string, bool, *log.Logger, chan struct{}, chan error)
+	switch *exchange {
+	case "bitmex":
+		dumpFunc = dumpBitmex
+	case "bitflyer":
+		dumpFunc = dumpBitflyer
+	case "bitfinex":
+		dumpFunc = dumpBitfinex
+	case "binance":
+		dumpFunc = dumpBinance
+	default:
 		fmt.Fprintln(os.Stderr, "Specify an exchange")
 		os.Exit(1)
 	}
-	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
 
 	// main loop to endlessly dump
 	recentRestartCount := 0
@@ -37,52 +48,40 @@ func main() {
 		logger.Println("starting dumper...")
 		lastStartTime := time.Now()
 
-		// receive SIGINT and setup to do stuff before exiting
-		// putting this will disable default behavior to immediately exit the application
-		// instead ignore the signal
+		// Receive SIGINT and setup to do stuff before exiting.
+		// Putting this will disable default behavior to immediately exit the application,
+		// instead ignore the signal.
 		interruptSignal := make(chan os.Signal)
 		signal.Notify(interruptSignal, os.Interrupt, syscall.SIGTERM)
-
-		errCh := make(chan error)
-		// buffering one is important
-		// this will ensure sending to this channel won't block main loop
-		stop := make(chan bool, 1)
-		go Dump(*exchange, *directory, logger, *alwaysDisk, errCh, stop)
-
+		stop := make(chan struct{})
+		dumpErr := make(chan error)
+		go dumpFunc(*directory, *alwaysDisk, logger, stop, dumpErr)
 		select {
-		case dumpErr := <-errCh:
-			logger.Println("error occurred:", dumpErr)
-			logger.Println("restarting...")
-
-			for {
-				dumpErr, ok := <-errCh
-				if !ok {
-					break
-				}
-				logger.Println("error occurred:", dumpErr)
+		case serr, ok := <-dumpErr:
+			if ok {
+				logger.Println("error occurred:", serr)
 			}
+			logger.Println("restarting...")
 			break
 		case <-interruptSignal:
-			// received SIGINT, exit the program
+			// Received SIGINT, exit the program
 			logger.Println("received SIGINT, exiting...")
-			// send stop signal to dumper
-			stop <- true
-			// wait for the dumper thread to stop
-			for {
-				dumpErr, ok := <-errCh
-				if !ok {
-					// channel closed
-					logger.Println("exiting")
-					os.Exit(1)
-				}
-				logger.Println("error occurred:", dumpErr)
+			// Send stop signal to dumper
+			close(stop)
+			// Wait for the dumper thread to stop
+			err, ok := <-dumpErr
+			if ok {
+				logger.Println(err)
 			}
+			// channel closed
+			logger.Println("exiting")
+			os.Exit(1)
 		}
-
-		// unnotify receiving interrupt
+		// Unnotify receiving interrupt
 		signal.Reset(os.Interrupt)
-
-		// it has to restart, but might have to wait for a little
+		// Wait for dump routine to stop
+		<-dumpErr
+		// Restart, but might have to wait for a little
 		if time.Now().Sub(lastStartTime) <= RapidRestartThreshold {
 			// this restart is counted as a rapid restart
 			waitTime := time.Duration(math.Pow(2, float64(recentRestartCount))) * time.Second
@@ -92,7 +91,7 @@ func main() {
 			logger.Printf("rapid restart detected, waiting for %d seconds...\n", waitTime/time.Second)
 			time.Sleep(waitTime)
 		} else {
-			// not a rapid restart, reset the count to 0
+			// Not a rapid restart, reset the count to 0
 			recentRestartCount = 0
 		}
 		recentRestartCount++
