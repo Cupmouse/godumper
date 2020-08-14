@@ -147,9 +147,11 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 	defer func() {
 		serr := writer.Close()
 		if serr != nil {
-			err = fmt.Errorf("%v, originally: %v", serr, err)
-		} else {
-			err = serr
+			if err != nil {
+				err = fmt.Errorf("%v, originally: %v", serr, err)
+			} else {
+				err = serr
+			}
 		}
 	}()
 	ws, serr := NewWebSocket(us, logger, 10000, 10000)
@@ -209,9 +211,6 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 		subscribes[i] = tisub
 		i++
 	}
-	if err != nil {
-		return fmt.Errorf("subscribe: %v", err)
-	}
 	for _, sub := range subscribes {
 		success, serr := ws.Send(sub)
 		if !success {
@@ -220,22 +219,6 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 			}
 			return errors.New("send queue overflown")
 		}
-		event, ok := <-ws.Event()
-		if !ok {
-			return ws.Error()
-		}
-		var m WriterQueueMethod
-		switch event.Type {
-		case WebSocketEventReceive:
-			m = WriteMessage
-		case WebSocketEventSend:
-			m = WriteSend
-		}
-		writer.Queue(&WriterQueueElement{
-			method:    m,
-			timestamp: event.Timestamp,
-			message:   event.Message,
-		})
 	}
 	logger.Println("binance dumping")
 	// Map of depth symbols who needs rest message
@@ -258,11 +241,14 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 				m = WriteSend
 			}
 			// Record message
-			writer.Queue(&WriterQueueElement{
+			err = writer.Queue(&WriterQueueElement{
 				method:    m,
 				timestamp: event.Timestamp,
 				message:   event.Message,
 			})
+			if err != nil {
+				return
+			}
 			if event.Type != WebSocketEventReceive {
 				continue
 			}
@@ -285,6 +271,7 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 				return
 			}
 			if stream != "depth@100ms" {
+				continue
 			}
 			_, ok = restNeeded[symbol]
 			if !ok {
@@ -313,12 +300,15 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 			if !ok {
 				return rest.Error()
 			}
-			writer.Queue(&WriterQueueElement{
+			err = writer.Queue(&WriterQueueElement{
 				method:    WriteMessageChannelKnown,
 				channel:   rres.Request.Metadata.(string) + "@" + streamcommons.BinanceStreamRESTDepth,
 				timestamp: rres.Timestamp,
 				message:   rres.Body,
 			})
+			if err != nil {
+				return
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
