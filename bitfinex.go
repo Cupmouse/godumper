@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -194,14 +195,6 @@ func (d *bitfinexDump) BeforeConnect() error {
 	return nil
 }
 
-func dumpBitfinex(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
-	defer close(errc)
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-	}()
-	err = dumpNormal("bitfinex", "wss://api-pub.bitfinex.com/ws/2", directory, alwaysDisk, logger, &bitfinexDump{logger: logger}, stop)
-	return
+func dumpBitfinex(ctx context.Context, directory string, alwaysDisk bool, logger *log.Logger) error {
+	return dumpNormal(ctx, "bitfinex", "wss://api-pub.bitfinex.com/ws/2", directory, alwaysDisk, logger, &bitfinexDump{logger: logger})
 }

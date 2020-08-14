@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/url"
 )
@@ -29,25 +30,15 @@ func (d *bitmexDump) BeforeConnect() error {
 	return nil
 }
 
-func dumpBitmex(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
-	defer close(errc)
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-	}()
+func dumpBitmex(ctx context.Context, directory string, alwaysDisk bool, logger *log.Logger) error {
 	u, serr := url.Parse("wss://www.bitmex.com/realtime")
 	if serr != nil {
-		err = serr
-		return
+		return serr
 	}
 	q := u.Query()
 	for _, ch := range bitmexChannels {
 		q.Add("subscribe", ch)
 	}
 	u.RawQuery = q.Encode()
-
-	err = dumpNormal("bitmex", u.String(), directory, alwaysDisk, logger, &bitmexDump{}, stop)
-	return
+	return dumpNormal(ctx, "bitmex", u.String(), directory, alwaysDisk, logger, &bitmexDump{})
 }

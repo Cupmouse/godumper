@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -87,14 +88,6 @@ func (d *bitflyerDump) BeforeConnect() error {
 	return nil
 }
 
-func dumpBitflyer(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
-	defer close(errc)
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-	}()
-	err = dumpNormal("bitflyer", "wss://ws.lightstream.bitflyer.com/json-rpc", directory, alwaysDisk, logger, &bitflyerDump{}, stop)
-	return
+func dumpBitflyer(ctx context.Context, directory string, alwaysDisk bool, logger *log.Logger) error {
+	return dumpNormal(ctx, "bitflyer", "wss://ws.lightstream.bitflyer.com/json-rpc", directory, alwaysDisk, logger, &bitflyerDump{})
 }

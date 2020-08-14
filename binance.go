@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/exchangedataset/streamcommons"
 	"github.com/exchangedataset/streamcommons/jsonstructs"
@@ -50,37 +47,14 @@ func binanceGenerateSubscribe(id int, channel string) ([]byte, error) {
 	return msub, nil
 }
 
-func binanceRESTSequential(ctx context.Context, ts string, query url.Values) ([]byte, error) {
-	req, serr := http.NewRequestWithContext(ctx, http.MethodGet, ts, nil)
-	if serr != nil {
-		return nil, serr
-	}
-	req.URL.RawQuery = query.Encode()
-	res, serr := http.DefaultClient.Do(req)
-	if serr != nil {
-		return nil, serr
-	}
-	if res.StatusCode == http.StatusTooManyRequests || res.StatusCode == http.StatusTeapot {
-		retryAfter, serr := strconv.Atoi(res.Header.Get("Retry-After"))
-		if serr != nil {
-			return nil, serr
-		}
-		// retryAfter is frequentry 0, but active for a sub-second?
-		time.Sleep(time.Duration(retryAfter+1) * time.Second)
-		// This will generated error on subscriber thread
-		return nil, fmt.Errorf("need retry: waited %ds for %d", retryAfter, res.StatusCode)
-	}
-	return ioutil.ReadAll(res.Body)
-}
-
 func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) ([]string, error) {
-	tickerBody, serr := binanceRESTSequential(ctx, "https://www.binance.com/api/v3/ticker/24hr", nil)
+	tickerBody, _, serr := rest(ctx, "https://www.binance.com/api/v3/ticker/24hr")
 	tickers := make([]jsonstructs.BinanceTicker24HrElement, 0, 5000)
 	serr = json.Unmarshal(tickerBody, &tickers)
 	if serr != nil {
 		return nil, fmt.Errorf("ticker 24hr: %v", serr)
 	}
-	exchangeInfoBody, serr := binanceRESTSequential(ctx, "https://www.binance.com/api/v3/exchangeInfo", nil)
+	exchangeInfoBody, _, serr := rest(ctx, "https://www.binance.com/api/v3/exchangeInfo")
 	if serr != nil {
 		return nil, fmt.Errorf("exchangeInfo: %v", serr)
 	}
@@ -158,129 +132,48 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 	return largeVolumeSymbols, nil
 }
 
-func binanceRESTDepth(ctx context.Context, symbol string, body chan WriterQueueElement, errc chan error) {
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-	}()
-	query := make(url.Values)
-	query.Set("symbol", symbol)
-	query.Set("limit", "1000")
-	b, serr := binanceRESTSequential(ctx, "https://www.binance.com/api/v3/depth", query)
-	if serr != nil {
-		err = serr
-		return
-	}
-	body <- WriterQueueElement{
-		method:    WriteMessageChannelKnown,
-		channel:   strings.ToLower(symbol) + "@" + streamcommons.BinanceStreamRESTDepth,
-		timestamp: time.Now(),
-		message:   b,
-	}
-}
-
-// To stop this routine, close `symbols`
-func binanceRESTRoutine(symbols chan string, out chan WriterQueueElement, errc chan error) {
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-		close(errc)
-		close(out)
-	}()
-	running := 0
-	ctx, cancel := context.WithCancel(context.Background())
-	body := make(chan WriterQueueElement)
-	rerr := make(chan error)
-	defer func() {
-		// This will stop the sub-routine
-		cancel()
-		for running > 0 {
-			// Sub routine will exit either by sending an body or an error
-			select {
-			case <-body:
-			case <-rerr:
-			}
-			running--
-		}
-		close(rerr)
-		close(body)
-	}()
-	for {
-		select {
-		case symbol, ok := <-symbols:
-			if !ok {
-				// Stop
-				return
-			}
-			go binanceRESTDepth(ctx, strings.ToUpper(symbol), body, rerr)
-			running++
-		case b := <-body:
-			running--
-			sent := false
-			for !sent {
-				select {
-				case out <- b:
-					sent = true
-				case symbol, ok := <-symbols:
-					if !ok {
-						return
-					}
-					go binanceRESTDepth(ctx, strings.ToUpper(symbol), body, rerr)
-					running++
-				}
-			}
-		case err = <-rerr:
-			running--
-			return
-		}
-	}
-}
-
-func dumpBinance(directory string, alwaysDisk bool, logger *log.Logger, stop chan struct{}, errc chan error) {
-	defer close(errc)
-	var err error
-	defer func() {
-		if err != nil {
-			errc <- err
-		}
-	}()
+func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger *log.Logger) (err error) {
 	// NOTE: symbols are in lower-case!
-	symbols, serr := binanceFetchLargestVolumeSymbols(context.Background(), logger)
+	symbols, serr := binanceFetchLargestVolumeSymbols(ctx, logger)
 	if serr != nil {
-		err = fmt.Errorf("market fetch: %v", serr)
-		return
+		return fmt.Errorf("market fetch: %v", serr)
 	}
 	logger.Println("List of symbols selected:", symbols)
 	us := "wss://stream.binance.com:9443/stream"
-	writer, werr := NewWriter("binance", us, directory, alwaysDisk, logger, 10000)
+	writer, serr := NewWriter("binance", us, directory, alwaysDisk, logger, 10000)
+	if serr != nil {
+		return serr
+	}
 	defer func() {
-		close(writer)
-		serr, ok := <-werr
-		if ok {
+		serr := writer.Close()
+		if serr != nil {
+			err = fmt.Errorf("%v, originally: %v", serr, err)
+		} else {
+			err = serr
+		}
+	}()
+	ws, serr := NewWebSocket(us, logger, 10000, 10000)
+	if serr != nil {
+		return serr
+	}
+	defer func() {
+		serr := ws.Close()
+		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("writer: %v, originally: %v", serr, err)
+				err = fmt.Errorf("%v, originally: %v", serr, err)
 			} else {
-				err = fmt.Errorf("writer: %v", serr)
+				err = serr
 			}
 		}
 	}()
-	event, send, wsstop, wserr, serr := NewWebSocket(us, logger, 10000, 10000)
-	if serr != nil {
-		err = serr
-		return
-	}
+	rest := NewRestClient()
 	defer func() {
-		close(wsstop)
-		serr, ok := <-wserr
-		if ok {
+		serr := rest.Close()
+		if serr != nil {
 			if err != nil {
-				err = fmt.Errorf("writer: %v, originally: %v", serr, err)
+				err = fmt.Errorf("%v, originally: %v", serr, err)
 			} else {
-				err = fmt.Errorf("writer: %v", serr)
+				err = serr
 			}
 		}
 	}()
@@ -317,53 +210,34 @@ func dumpBinance(directory string, alwaysDisk bool, logger *log.Logger, stop cha
 		i++
 	}
 	if err != nil {
-		err = fmt.Errorf("subscribe: %v", err)
-		return
+		return fmt.Errorf("subscribe: %v", err)
 	}
 	for _, sub := range subscribes {
-		select {
-		case send <- sub:
-		case event := <-event:
-			var m WriterQueueMethod
-			switch event.Type {
-			case WebSocketEventReceive:
-				m = WriteMessage
-			case WebSocketEventSend:
-				m = WriteSend
+		success, serr := ws.Send(sub)
+		if !success {
+			if serr != nil {
+				return serr
 			}
-			select {
-			case writer <- WriterQueueElement{
-				method:    m,
-				timestamp: event.Timestamp,
-				message:   event.Message,
-			}:
-			case serr := <-werr:
-				err = fmt.Errorf("writer: %v", serr)
-				return
-			case <-stop:
-				return
-			}
-		case serr := <-wserr:
-			err = fmt.Errorf("websocket: %v", serr)
-			return
+			return errors.New("send queue overflown")
 		}
+		event, ok := <-ws.Event()
+		if !ok {
+			return ws.Error()
+		}
+		var m WriterQueueMethod
+		switch event.Type {
+		case WebSocketEventReceive:
+			m = WriteMessage
+		case WebSocketEventSend:
+			m = WriteSend
+		}
+		writer.Queue(&WriterQueueElement{
+			method:    m,
+			timestamp: event.Timestamp,
+			message:   event.Message,
+		})
 	}
 	logger.Println("binance dumping")
-	restJob := make(chan string)
-	rest := make(chan WriterQueueElement)
-	rerr := make(chan error)
-	go binanceRESTRoutine(restJob, rest, rerr)
-	defer func() {
-		close(restJob)
-		serr, ok := <-rerr
-		if ok {
-			if err != nil {
-				err = fmt.Errorf("rest: %v, originally: %v", serr, err)
-			} else {
-				err = fmt.Errorf("rest: %v", serr)
-			}
-		}
-	}()
 	// Map of depth symbols who needs rest message
 	restNeeded := make(map[string]bool)
 	for _, symbol := range symbols {
@@ -371,89 +245,82 @@ func dumpBinance(directory string, alwaysDisk bool, logger *log.Logger, stop cha
 	}
 	for {
 		select {
-		case e := <-event:
+		case event, ok := <-ws.Event():
+			if !ok {
+				// Check for error
+				return ws.Error()
+			}
 			var m WriterQueueMethod
-			switch e.Type {
+			switch event.Type {
 			case WebSocketEventReceive:
 				m = WriteMessage
-				if len(restNeeded) > 0 {
-					// Check if this channel is depth
-					// If depth, check if it needs a rest message
-					root := new(jsonstructs.BinanceReponseRoot)
-					serr := json.Unmarshal(e.Message, root)
-					if serr != nil {
-						err = fmt.Errorf("root unmarshal: %v", serr)
-						return
-					}
-					if root.Stream != "" {
-						symbol, stream, serr := streamcommons.BinanceDecomposeChannel(root.Stream)
-						if serr != nil {
-							err = serr
-							return
-						}
-						if stream == "depth@100ms" {
-							_, ok := restNeeded[symbol]
-							if ok {
-								// A REST message is needed
-								select {
-								case restJob <- symbol:
-								case serr := <-rerr:
-									err = fmt.Errorf("rest: %v", serr)
-									return
-								case <-stop:
-									return
-								case rb := <-rest:
-									select {
-									case writer <- rb:
-									case serr := <-werr:
-										err = fmt.Errorf("writer: %v", serr)
-										return
-									case <-stop:
-										return
-									}
-								}
-								// Don't need a REST message anymore
-								delete(restNeeded, symbol)
-							}
-						}
-					}
-				}
 			case WebSocketEventSend:
 				m = WriteSend
 			}
-			select {
-			case writer <- WriterQueueElement{
+			// Record message
+			writer.Queue(&WriterQueueElement{
 				method:    m,
-				timestamp: e.Timestamp,
-				message:   e.Message,
-			}:
-			case serr := <-werr:
-				err = fmt.Errorf("writer: %v", serr)
-				return
-			case <-stop:
+				timestamp: event.Timestamp,
+				message:   event.Message,
+			})
+			if event.Type != WebSocketEventReceive {
+				continue
+			}
+			if len(restNeeded) == 0 {
+				continue
+			}
+			// Check if this channel is depth
+			// If depth, check if it needs a rest message
+			root := new(jsonstructs.BinanceReponseRoot)
+			serr := json.Unmarshal(event.Message, root)
+			if serr != nil {
+				return fmt.Errorf("root unmarshal: %v", serr)
+			}
+			if root.Stream == "" {
+				continue
+			}
+			symbol, stream, serr := streamcommons.BinanceDecomposeChannel(root.Stream)
+			if serr != nil {
+				err = serr
 				return
 			}
-		case rb := <-rest:
-			select {
-			case writer <- rb:
-			case serr := <-werr:
-				err = fmt.Errorf("writer: %v", serr)
-				return
-			case <-stop:
+			if stream != "depth@100ms" {
+			}
+			_, ok = restNeeded[symbol]
+			if !ok {
+				continue
+			}
+			// A REST message is needed
+			query := make(url.Values)
+			query.Set("symbol", symbol)
+			query.Set("limit", "1000")
+			u, serr := url.Parse("https://www.binance.com/api/v3/depth")
+			if serr != nil {
+				err = serr
 				return
 			}
-		case serr := <-werr:
-			err = fmt.Errorf("writer: %v", serr)
-			return
-		case serr := <-wserr:
-			err = fmt.Errorf("websocket: %v", serr)
-			return
-		case serr := <-rerr:
-			err = fmt.Errorf("rest: %v", serr)
-			return
-		case <-stop:
-			// Stop signal received
-			return
+			u.RawQuery = query.Encode()
+			err = rest.Request(&RestRequest{
+				URL:      u.String(),
+				Metadata: strings.ToLower(symbol),
+			})
+			if err != nil {
+				return
+			}
+			// Don't need a REST message anymore
+			delete(restNeeded, symbol)
+		case rres, ok := <-rest.Response():
+			if !ok {
+				return rest.Error()
+			}
+			writer.Queue(&WriterQueueElement{
+				method:    WriteMessageChannelKnown,
+				channel:   rres.Request.Metadata.(string) + "@" + streamcommons.BinanceStreamRESTDepth,
+				timestamp: rres.Timestamp,
+				message:   rres.Body,
+			})
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

@@ -30,47 +30,48 @@ type WebSocketEventData struct {
 // WebSocketClient is WebSocket client wrapper.
 // Must be closed.
 type WebSocketClient struct {
-	conn *websocket.Conn
-	// Do not close from public
-	Event chan WebSocketEventData
-	// Do not close from public
-	Send     chan []byte
-	readErr  chan error
-	writeErr chan error
+	conn      *websocket.Conn
+	logger    *log.Logger
+	events    chan *WebSocketEventData
+	send      chan []byte
+	stop      chan struct{}
+	errc      chan error
+	lastError error
+	closed    bool
 }
 
 // To stop, close conn, then close stop
-func websocketReadRoutine(conn *websocket.Conn, logger *log.Logger, event chan WebSocketEventData, stop chan struct{}, errc chan error) {
+func (c *WebSocketClient) readRoutine(stop chan struct{}, errc chan error) {
 	var err error
 	defer func() {
 		if err != nil {
-			errc <- err
+			errc <- fmt.Errorf("read: %v", err)
 		}
 		close(errc)
 	}()
 	defer func() {
 		if rec := recover(); rec != nil {
 			if err != nil {
-				err = fmt.Errorf("recover: %v, originally: %v", rec, err)
+				err = fmt.Errorf("read: recover: %v, originally: %v", rec, err)
 			} else {
-				err = fmt.Errorf("recover: %v", rec)
+				err = fmt.Errorf("read: recover: %v", rec)
 			}
-			logger.Printf("%s", debug.Stack())
+			c.logger.Printf("%s", debug.Stack())
 		}
 	}()
 	for {
-		typ, msg, serr := conn.ReadMessage()
+		typ, msg, serr := c.conn.ReadMessage()
 		now := time.Now()
 		if serr != nil {
 			err = serr
 			return
 		}
 		if typ == websocket.BinaryMessage {
-			err = errors.New("BinaryMessage as messageType is not supported")
+			err = errors.New("read: BinaryMessage as messageType is not supported")
 			return
 		}
 		select {
-		case event <- WebSocketEventData{
+		case c.events <- &WebSocketEventData{
 			Type:      WebSocketEventReceive,
 			Timestamp: now,
 			Message:   msg,
@@ -79,44 +80,42 @@ func websocketReadRoutine(conn *websocket.Conn, logger *log.Logger, event chan W
 			// Force stop
 			return
 		}
-
 	}
 }
 
 // To stop, close conn, then close stop
-func websocketWriteRoutine(conn *websocket.Conn, logger *log.Logger, event chan WebSocketEventData, messages chan []byte, stop chan struct{}, errc chan error) {
+func (c *WebSocketClient) writeRoutine(stop chan struct{}, errc chan error) {
 	var err error
 	defer func() {
 		if err != nil {
-			errc <- err
+			errc <- fmt.Errorf("write: %v", err)
 		}
 		close(errc)
 	}()
 	defer func() {
 		if rec := recover(); rec != nil {
 			if err != nil {
-				err = fmt.Errorf("recover: %v, originally: %v", rec, err)
+				err = fmt.Errorf("write: recover: %v, originally: %v", rec, err)
 			} else {
-				err = fmt.Errorf("recover: %v", rec)
+				err = fmt.Errorf("write: recover: %v", rec)
 			}
-			logger.Printf("%s", debug.Stack())
+			c.logger.Printf("%s", debug.Stack())
 		}
 	}()
 	for {
 		select {
-		case msg, ok := <-messages:
+		case msg, ok := <-c.send:
 			if !ok {
 				// The channel closed
 				return
 			}
-			serr := conn.WriteMessage(websocket.TextMessage, msg)
+			err = c.conn.WriteMessage(websocket.TextMessage, msg)
 			now := time.Now()
-			if serr != nil {
-				err = serr
+			if err != nil {
 				return
 			}
 			select {
-			case event <- WebSocketEventData{
+			case c.events <- &WebSocketEventData{
 				Type:      WebSocketEventSend,
 				Timestamp: now,
 				Message:   msg,
@@ -130,63 +129,48 @@ func websocketWriteRoutine(conn *websocket.Conn, logger *log.Logger, event chan 
 	}
 }
 
-// websocketRoutine controls write/read routine.
+// websocketRoutine manages write/read routine.
 // `errc` will be closed if this routine stopped executing.
-func websocketRoutine(conn *websocket.Conn, logger *log.Logger, event chan WebSocketEventData, send chan []byte, stop chan struct{}, errc chan error) {
+func (c *WebSocketClient) websocketRoutine() {
 	var err error
 	defer func() {
+		// This have to be closed before c.errc so others know error was happened
+		close(c.events)
 		if err != nil {
-			errc <- err
+			c.errc <- fmt.Errorf("websocket: %v", err)
 		}
-		close(errc)
-		close(event)
-	}()
-	connClosed := false
-	defer func() {
-		if !connClosed {
-			serr := conn.Close()
-			connClosed = true
-			if serr != nil {
-				if err != nil {
-					err = fmt.Errorf("conn close: %v, originally: %v", serr, err)
-				} else {
-					err = fmt.Errorf("conn close: %v", serr)
-				}
-			}
-		}
+		close(c.errc)
 	}()
 	rwstop := make(chan struct{})
 	readErr := make(chan error)
-	go websocketReadRoutine(conn, logger, event, rwstop, readErr)
+	go c.readRoutine(rwstop, readErr)
 	defer func() {
 		// Same as below but for a read routine
 		serr, ok := <-readErr
 		if ok {
 			if err != nil {
-				err = fmt.Errorf("read: %v, originally: %v", serr, err)
+				err = fmt.Errorf("%v, originally: %v", serr, err)
 			} else {
-				err = fmt.Errorf("read: %v", serr)
+				err = serr
 			}
 		}
 	}()
 	writeErr := make(chan error)
-	go websocketWriteRoutine(conn, logger, event, send, rwstop, writeErr)
+	go c.writeRoutine(rwstop, writeErr)
 	defer func() {
 		// Wait for a write routine to stop by either closing the channel or returning error
 		serr, ok := <-writeErr
 		if ok {
 			if err != nil {
-				err = fmt.Errorf("write: %v, originally: %v", serr, err)
+				err = fmt.Errorf("%v, originally: %v", serr, err)
 			} else {
-				err = fmt.Errorf("write: %v", serr)
+				err = serr
 			}
 		}
 	}()
-	defer close(rwstop)
 	defer func() {
 		// This will stop read/write
-		connClosed = true
-		serr := conn.Close()
+		serr := c.conn.Close()
 		if serr != nil {
 			if err != nil {
 				err = fmt.Errorf("conn close: %v, originally: %v", serr, err)
@@ -194,39 +178,78 @@ func websocketRoutine(conn *websocket.Conn, logger *log.Logger, event chan WebSo
 				err = fmt.Errorf("conn close: %v", serr)
 			}
 		}
-	}()
-	defer func() {
-		if rec := recover(); rec != nil {
-			if err != nil {
-				err = fmt.Errorf("recover: %v, originally: %v", rec, err)
-			} else {
-				err = fmt.Errorf("recover: %v", rec)
-			}
-			logger.Printf("%s", debug.Stack())
-		}
+		close(rwstop)
 	}()
 	select {
-	case serr := <-readErr:
-		err = fmt.Errorf("read: %v", serr)
-	case serr := <-writeErr:
-		err = fmt.Errorf("writer: %v", serr)
-	case <-stop:
-		break
+	case err = <-readErr:
+	case err = <-writeErr:
+	case <-c.stop:
 	}
+}
+
+// Send adds send jobs to the queue.
+// returns false as `success` if the queue is full or an error is returned.
+// Always returns an error if the client is closed.
+func (c *WebSocketClient) Send(msg []byte) (success bool, err error) {
+	if c.closed {
+		return false, errors.New("websocket: already closed")
+	}
+	if c.lastError != nil {
+		return false, c.lastError
+	}
+	select {
+	case c.send <- msg:
+		return true, nil
+	case serr, ok := <-c.errc:
+		if ok {
+			c.lastError = serr
+			return false, serr
+		}
+		return false, errors.New("websocket: connection unavailable")
+	default:
+		// Send queue is full
+		return false, nil
+	}
+}
+
+// Event returns channel to receive event.
+// If returned channel is closed, then check for an error using `Error`.
+func (c *WebSocketClient) Event() chan *WebSocketEventData {
+	return c.events
+}
+
+// Error returns the last reported error from
+func (c *WebSocketClient) Error() error {
+	if c.closed {
+		return errors.New("websocket: already closed")
+	}
+	serr, ok := <-c.errc
+	if ok {
+		c.lastError = serr
+		return serr
+	}
+	return c.lastError
+}
+
+// Close closes the client and frees resources associated with.
+// If the client has already been closed, it returns the last error.
+func (c *WebSocketClient) Close() error {
+	if c.closed {
+		return c.lastError
+	}
+	close(c.stop)
+	c.closed = true
+	serr, ok := <-c.errc
+	if ok {
+		c.lastError = serr
+		return serr
+	}
+	return nil
 }
 
 // NewWebSocket connects to a WebSocket server.
 // An error occurred at the creation of a connection is returned immidiately.
-// `chan WebSocketEventData` will be closed after `chan error` is closed.
-// `chan []byte` is the channel to send messages.
-// `chan WebSocketEventData` as well as `chan error` must be watched when sending a message.
-// Must only be closed after `chan error` is closed.
-// Be careful when sending a message, one also have to look for an error in case blocked.
-// `chan struct{}` is closed by the caller when the connection should be closed.
-// Note that it won't be closed on its own, only be closed by the caller.
-// `chan error` will be used to report a future error on message write/read and be closed after the connection closed
-// to indicate all resources associated with the connection are freed.
-func NewWebSocket(us string, logger *log.Logger, eventBufferSize int, sendBufferSize int) (chan WebSocketEventData, chan []byte, chan struct{}, chan error, error) {
+func NewWebSocket(us string, logger *log.Logger, eventBufferSize int, sendBufferSize int) (*WebSocketClient, error) {
 	// Connect to the WebSocket server
 	dialer := websocket.Dialer{
 		WriteBufferSize:  1024 * 32,
@@ -235,20 +258,23 @@ func NewWebSocket(us string, logger *log.Logger, eventBufferSize int, sendBuffer
 	}
 	conn, res, serr := dialer.Dial(us, nil)
 	if serr != nil {
-		return nil, nil, nil, nil, serr
+		return nil, serr
 	}
 	if res.StatusCode != 101 {
-		err := fmt.Errorf("connect to WebSocket server failed: status code %d", res.StatusCode)
+		err := fmt.Errorf("websocket: status code %d", res.StatusCode)
 		serr := conn.Close()
 		if serr != nil {
 			err = fmt.Errorf("%v, original error was: %v", serr, err)
 		}
-		return nil, nil, nil, nil, err
+		return nil, err
 	}
-	event := make(chan WebSocketEventData)
-	send := make(chan []byte, sendBufferSize)
-	stop := make(chan struct{})
-	errc := make(chan error)
-	go websocketRoutine(conn, logger, event, send, stop, errc)
-	return event, send, stop, errc, nil
+	c := new(WebSocketClient)
+	c.conn = conn
+	c.errc = make(chan error)
+	c.events = make(chan *WebSocketEventData, eventBufferSize)
+	c.send = make(chan []byte, sendBufferSize)
+	c.stop = make(chan struct{})
+	c.logger = logger
+	go c.websocketRoutine()
+	return c, nil
 }

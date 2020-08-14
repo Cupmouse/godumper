@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -27,7 +28,7 @@ func main() {
 	flag.Parse()
 	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
 
-	var dumpFunc func(string, bool, *log.Logger, chan struct{}, chan error)
+	var dumpFunc func(context.Context, string, bool, *log.Logger) error
 	switch *exchange {
 	case "bitmex":
 		dumpFunc = dumpBitmex
@@ -53,9 +54,15 @@ func main() {
 		// instead ignore the signal.
 		interruptSignal := make(chan os.Signal)
 		signal.Notify(interruptSignal, os.Interrupt, syscall.SIGTERM)
-		stop := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
 		dumpErr := make(chan error)
-		go dumpFunc(*directory, *alwaysDisk, logger, stop, dumpErr)
+		go func() {
+			serr := dumpFunc(ctx, *directory, *alwaysDisk, logger)
+			if serr != nil {
+				dumpErr <- serr
+			}
+			close(dumpErr)
+		}()
 		select {
 		case serr, ok := <-dumpErr:
 			if ok {
@@ -67,7 +74,7 @@ func main() {
 			// Received SIGINT, exit the program
 			logger.Println("received SIGINT, exiting...")
 			// Send stop signal to dumper
-			close(stop)
+			cancel()
 			// Wait for the dumper thread to stop
 			err, ok := <-dumpErr
 			if ok {
