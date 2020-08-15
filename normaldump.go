@@ -24,8 +24,7 @@ func dumpNormal(ctx context.Context, exchange string, us string, directory strin
 	}
 	writer, serr := NewWriter(exchange, us, directory, alwaysDisk, logger, 10000)
 	if serr != nil {
-		err = serr
-		return
+		return serr
 	}
 	defer func() {
 		// Close writer

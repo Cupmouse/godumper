@@ -19,7 +19,7 @@ import (
 // WriterBufferSize is the size of dataset buffer, 5MB
 const WriterBufferSize = 5 * 1024 * 1024
 
-// writer writes messages to gzipped file
+// Writer writes messages to gzipped file
 type writer struct {
 	closed        bool
 	lastTimestamp int64
@@ -40,50 +40,48 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 		err = errors.New("tried to write to an already closed writer")
 		return
 	}
-
-	// correct time from going backwards
+	// Correct time from going backwards
 	if timestamp < w.lastTimestamp {
-		// time is running backwards
-		// probably because of system time correction
+		// Time is running backwards
+		// Probably because of system time correction
 		w.logger.Println("timestamp is older than the last observed, substituting it to the last observed value")
 		timestamp = w.lastTimestamp
 	}
 	correctedTimestamp = timestamp
-
-	// it creates new file for every minute
+	// It creates new file for every minute
 	minute := int64(time.Duration(timestamp) / time.Minute)
 	lastMinute := int64(time.Duration(w.lastTimestamp) / time.Minute)
-
-	// set timestamp as last write time, this have to be after lastMinute is calculated
+	// Set timestamp as last write time, this have to be after lastMinute is calculated
 	w.lastTimestamp = timestamp
-
 	if minute == lastMinute {
-		// continues to use the same stream & file name
+		// Continues to use the same stream & file name
 		return
 	}
-	// time to split dataset
-
+	// Time to split dataset
 	isFirstFile := w.buffer == nil
 	if isFirstFile {
-		// create new buffer
+		// Create new buffer
 		bufArr := make([]byte, 0, WriterBufferSize)
 		w.buffer = bytes.NewBuffer(bufArr)
-		// prepare buffer writer
+		// Prepare buffer writer
 		w.writer = bufio.NewWriter(w.buffer)
-		// prepare gzip writer
+		// Prepare gzip writer
 		w.gwriter, err = gzip.NewWriterLevel(w.writer, gzip.BestCompression)
 		if err != nil {
 			return
 		}
-
-		// write start line
+		// Write start line
 		startLine := fmt.Sprintf("start\t%d\t%s\n", timestamp, w.url)
 		_, err = w.gwriter.Write([]byte(startLine))
 		if err != nil {
 			return
 		}
+		err = w.sim.ProcessStart([]byte(w.url))
+		if err != nil {
+			return
+		}
 	} else {
-		// this will flush and write gzip footer
+		// This will flush and write gzip footer
 		err = w.gwriter.Close()
 		if err != nil {
 			return
@@ -93,22 +91,21 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 			return
 		}
 
-		// upload or store datasets
+		// Upload or store datasets
 		err = w.uploadOrStore()
 		if err != nil {
 			return
 		}
-		// emptify buffer
+		// Emptify buffer
 		w.buffer.Reset()
-		// don't have to do anything to writer
-		// prepare gzip writer
+		// Don't have to do anything to writer
+		// Prepare gzip writer
 		w.gwriter, err = gzip.NewWriterLevel(w.writer, gzip.BestCompression)
 		if err != nil {
 			return
 		}
-
 		if minute%10 == 0 {
-			// if last digit of minute is 0 then write state snapshot
+			// If last digit of minute is 0 then write state snapshot
 			var snapshots []simulator.Snapshot
 			snapshots, err = w.sim.TakeStateSnapshot()
 			for _, s := range snapshots {
@@ -120,34 +117,32 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 			}
 		}
 	}
-
-	// change file timestamp, this is used to generate file name
+	// Change file timestamp, this is used to generate file name
 	w.fileTimestamp = timestamp
-
 	return
 }
 
-// this method assumes contents in buffer are complete
-// this means it does not perform flush or closing gzip writer
-// before writing the contents of buffer
+// This method assumes contents in buffer are complete.
+// This means it does not perform flush or closing gzip writer.
+// Before writing the contents of buffer.
 func (w *writer) uploadOrStore() (err error) {
-	// name for file would be <exchange>_<timestamp>.gz
+	// Name for file would be <exchange>_<timestamp>.gz
 	fileName := fmt.Sprintf("%s_%d.gz", w.exchange, w.fileTimestamp)
 	if !w.alwaysDisk {
-		// try to upload it to s3
-		// creating new reader from original buffer array because if you read bytes from
+		// Try to upload it to s3
+		// Creating new reader from original buffer array because if you read bytes from
 		// buffer, read bytes will be lost from buffer
-		// we might use them later if s3 upload failed
+		// We might use them later if s3 upload failed
 		err = streamcommons.PutS3Object(fileName, bytes.NewReader(w.buffer.Bytes()))
 		if err == nil {
 			// successful
 			w.logger.Println("uploaded to s3:", fileName)
 			return
 		}
-		// if can not be uploaded to s3, then store it in local storage
+		// If can not be uploaded to s3, then store it in local storage
 		w.logger.Printf("Could not be uploaded to s3: %v\n", err)
 	}
-	// make directories to store file
+	// Make directories to store file
 	err = os.MkdirAll(w.directory, 0744)
 	if err != nil {
 		return
@@ -159,7 +154,7 @@ func (w *writer) uploadOrStore() (err error) {
 		return
 	}
 	defer func() {
-		// defer function to ensure that opened file be closed
+		// Defer function to ensure that opened file be closed
 		serr := file.Close()
 		if serr != nil {
 			if err != nil {
@@ -169,9 +164,7 @@ func (w *writer) uploadOrStore() (err error) {
 			}
 		}
 	}()
-
 	_, err = file.Write(w.buffer.Bytes())
-
 	w.logger.Printf("making new file: %s\n", fileName)
 	return
 }
@@ -458,6 +451,7 @@ func (w *Writer) Close() error {
 // A writer routine can be stopped by closing `chan WriterQueueElement`.
 func NewWriter(exchange string, urlStr string, directory string, alwaysDisk bool, logger *log.Logger, queueSize int) (w *Writer, err error) {
 	w = new(Writer)
+	w.logger = logger
 	w.queue = make(chan *WriterQueueElement, queueSize)
 	w.errc = make(chan error)
 	w.stop = make(chan struct{})

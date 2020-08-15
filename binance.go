@@ -15,7 +15,7 @@ import (
 	"github.com/exchangedataset/streamcommons/jsonstructs"
 )
 
-const binanceMaximumDepthSubscribe = 5
+const binanceMaximumDepthSubscribe = 20
 
 var binancePrioritySymbols = []string{"BTCUSDT", "tETHUSD"}
 
@@ -139,7 +139,17 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 		return fmt.Errorf("market fetch: %v", serr)
 	}
 	logger.Println("List of symbols selected:", symbols)
-	us := "wss://stream.binance.com:9443/stream"
+	streams := make([]string, 3*len(symbols))
+	for i, symbol := range symbols {
+		streams[i*3+0] = symbol + "@depth@100ms"
+		streams[i*3+1] = symbol + "@trade"
+		streams[i*3+2] = symbol + "@ticker"
+	}
+	u, serr := url.Parse("wss://stream.binance.com:9443/stream?streams=" + strings.Join(streams, "/"))
+	if serr != nil {
+		return serr
+	}
+	us := u.String()
 	writer, serr := NewWriter("binance", us, directory, alwaysDisk, logger, 10000)
 	if serr != nil {
 		return serr
@@ -179,47 +189,6 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 			}
 		}
 	}()
-	logger.Println("sending subscribe")
-	subscribes := make([][]byte, 3*len(symbols))
-	// ID must not be zero as it's used as a flag to check if a unmarshaling response were
-	// successful
-	id := 1
-	i := 0
-	for _, symbol := range symbols {
-		dsub, serr := binanceGenerateSubscribe(id, symbol+"@depth@100ms")
-		id++
-		if serr != nil {
-			err = fmt.Errorf("depth: %v", serr)
-			break
-		}
-		subscribes[i] = dsub
-		i++
-		tsub, serr := binanceGenerateSubscribe(id, symbol+"@trade")
-		id++
-		if serr != nil {
-			err = fmt.Errorf("trade: %v", serr)
-			break
-		}
-		subscribes[i] = tsub
-		i++
-		tisub, serr := binanceGenerateSubscribe(id, symbol+"@ticker")
-		id++
-		if serr != nil {
-			err = fmt.Errorf("trade: %v", serr)
-			break
-		}
-		subscribes[i] = tisub
-		i++
-	}
-	for _, sub := range subscribes {
-		success, serr := ws.Send(sub)
-		if !success {
-			if serr != nil {
-				return serr
-			}
-			return errors.New("send queue overflown")
-		}
-	}
 	logger.Println("binance dumping")
 	// Map of depth symbols who needs rest message
 	restNeeded := make(map[string]bool)
@@ -279,7 +248,7 @@ func dumpBinance(ctx context.Context, directory string, alwaysDisk bool, logger 
 			}
 			// A REST message is needed
 			query := make(url.Values)
-			query.Set("symbol", symbol)
+			query.Set("symbol", strings.ToUpper(symbol))
 			query.Set("limit", "1000")
 			u, serr := url.Parse("https://www.binance.com/api/v3/depth")
 			if serr != nil {
