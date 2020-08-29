@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
 
 	"github.com/exchangedataset/streamcommons/jsonstructs"
 )
@@ -18,26 +16,11 @@ var bitflyerChannelPrefixes = []string{
 	"lightning_ticker_",
 }
 
-func bitflyerFetchMarkets() (productCodes []string, err error) {
+func bitflyerFetchMarkets(ctx context.Context) (productCodes []string, err error) {
 	// Fetch what markets they have
-	res, err := http.Get("https://api.bitflyer.com/v1/markets")
-	defer func() {
-		serr := res.Body.Close()
-		if serr != nil {
-			if err != nil {
-				err = fmt.Errorf("%v, original error was: %v", serr, err)
-			} else {
-				err = serr
-			}
-		}
-	}()
-	if err != nil {
-		return
-	}
-	var resBytes []byte
-	resBytes, err = ioutil.ReadAll(res.Body)
-	if err != nil {
-		return
+	resBytes, _, serr := rest(ctx, "https://api.bitflyer.com/v1/markets")
+	if serr != nil {
+		return nil, serr
 	}
 	markets := make([]struct {
 		ProductCode string `json:"product_code"`
@@ -79,9 +62,9 @@ func (d *bitflyerDump) Subscribe() ([][]byte, error) {
 	}
 	return subs, nil
 }
-func (d *bitflyerDump) BeforeConnect() error {
+func (d *bitflyerDump) BeforeConnect(ctx context.Context) error {
 	var serr error
-	d.productCodes, serr = bitflyerFetchMarkets()
+	d.productCodes, serr = bitflyerFetchMarkets(ctx)
 	if serr != nil {
 		return fmt.Errorf("fetch markets: %v", serr)
 	}

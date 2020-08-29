@@ -69,7 +69,7 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 	for _, ticker := range tickers {
 		lastPrice, serr := strconv.ParseFloat(ticker.LastPrice, 64)
 		if serr != nil {
-			return nil, fmt.Errorf("LastPrice ParseFloat: %v", serr)
+			return nil, fmt.Errorf("LastPrice: %v", serr)
 		}
 		priceTable[ticker.Symbol] = lastPrice
 	}
@@ -87,7 +87,7 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 			var serr error
 			usdVolume, serr = strconv.ParseFloat(ticker.QuoteVolume, 64)
 			if serr != nil {
-				return nil, fmt.Errorf("QuoteVolume ParseFloat: %v", serr)
+				return nil, fmt.Errorf("QuoteVolume: %v", serr)
 			}
 		} else {
 			// Calculate usd volume from a base vs USDT market
@@ -95,7 +95,7 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 			if ok {
 				volume, serr := strconv.ParseFloat(ticker.Volume, 64)
 				if serr != nil {
-					return nil, fmt.Errorf("Volume ParseFloat: %v", serr)
+					return nil, fmt.Errorf("Volume: %v", serr)
 				}
 				usdVolume = baseUSDPrice * volume
 			} else {
@@ -104,7 +104,7 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 				if ok {
 					quoteVolume, serr := strconv.ParseFloat(ticker.QuoteVolume, 64)
 					if serr != nil {
-						return nil, fmt.Errorf("QuoteVolume ParseFloat: %v", serr)
+						return nil, fmt.Errorf("QuoteVolume: %v", serr)
 					}
 					usdVolume = quoteUSDPrice * quoteVolume
 				} else {

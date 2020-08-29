@@ -9,14 +9,14 @@ import (
 
 // NormalDump is the interface of normaldump compatibles
 type NormalDump interface {
-	BeforeConnect() error
+	BeforeConnect(context.Context) error
 	Subscribe() ([][]byte, error)
 }
 
 func dumpNormal(ctx context.Context, exchange string, us string, directory string, alwaysDisk bool, logger *log.Logger,
 	d NormalDump) (err error) {
 	if d != nil {
-		serr := d.BeforeConnect()
+		serr := d.BeforeConnect(ctx)
 		if serr != nil {
 			err = fmt.Errorf("before connect: %v", serr)
 			return

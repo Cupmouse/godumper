@@ -38,6 +38,11 @@ func main() {
 		dumpFunc = dumpBitfinex
 	case "binance":
 		dumpFunc = dumpBinance
+	case "bitbank":
+		logger.Println("dump for bitbank is not mantained")
+		dumpFunc = dumpBitbank
+	case "liquid":
+		dumpFunc = dumpLiquid
 	default:
 		fmt.Fprintln(os.Stderr, "Specify an exchange")
 		os.Exit(1)

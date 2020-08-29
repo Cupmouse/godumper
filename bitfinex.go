@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -49,28 +47,13 @@ type bitfinexDump struct {
 	logger       *log.Logger
 }
 
-func (d *bitfinexDump) FetchMarkets() (symbols []string, err error) {
+func (d *bitfinexDump) fetchMarkets(ctx context.Context) (symbols []string, err error) {
 	// Before start dumping, bitfinex has too much currencies so it has channel limitation
 	// We must cherry pick the best one to observe its trade
 	// We can determine this by retrieving trading volumes for each symbol and pick coins which volume is in the most
-	var res *http.Response
-	res, err = http.Get("https://api.bitfinex.com/v2/tickers?symbols=ALL")
-	if err != nil {
-		return
-	}
-	defer func() {
-		serr := res.Body.Close()
-		if serr != nil {
-			if err != nil {
-				err = fmt.Errorf("%v, original error was: %v", serr, err)
-			} else {
-				err = serr
-			}
-		}
-	}()
-	resBytes, serr := ioutil.ReadAll(res.Body)
+	resBytes, _, serr := rest(ctx, "https://api.bitfinex.com/v2/tickers?symbols=ALL")
 	if serr != nil {
-		return nil, serr
+		return
 	}
 	// This is to store tickers for all symbols including trade and funding
 	tickersAll := make([]interface{}, 0, 1000)
@@ -170,8 +153,8 @@ func (d *bitfinexDump) Subscribe() ([][]byte, error) {
 	}
 	return subscribes, nil
 }
-func (d *bitfinexDump) BeforeConnect() error {
-	allMarkets, serr := d.FetchMarkets()
+func (d *bitfinexDump) BeforeConnect(ctx context.Context) error {
+	allMarkets, serr := d.fetchMarkets(ctx)
 	if serr != nil {
 		return serr
 	}

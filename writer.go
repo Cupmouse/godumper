@@ -108,6 +108,9 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 			// If last digit of minute is 0 then write state snapshot
 			var snapshots []simulator.Snapshot
 			snapshots, err = w.sim.TakeStateSnapshot()
+			if err != nil {
+				return
+			}
 			for _, s := range snapshots {
 				stateLine := fmt.Sprintf("state\t%d\t%s\t%s\n", timestamp, s.Channel, s.Snapshot)
 				_, err = w.gwriter.Write([]byte(stateLine))

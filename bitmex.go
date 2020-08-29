@@ -26,7 +26,8 @@ type bitmexDump struct {
 func (d *bitmexDump) Subscribe() ([][]byte, error) {
 	return nil, nil
 }
-func (d *bitmexDump) BeforeConnect() error {
+
+func (d *bitmexDump) BeforeConnect(ctx context.Context) error {
 	return nil
 }
 
