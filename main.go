@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/exchangedataset/streamcommons"
 )
 
 // RapidRestartThreshold is the time threshold that if dumper has restarted within this period of time
@@ -25,6 +27,7 @@ func main() {
 	exchange := flag.String("exchange", "", "a name of target exchange")
 	directory := flag.String("directory", "./dumpfiles", "path to the directory to store dumps")
 	alwaysDisk := flag.Bool("disk", true, "always store dumps as file")
+	prod := flag.Bool("prod", false, "turn on production mode")
 	flag.Parse()
 	logger := log.New(os.Stdout, "godumper", log.LstdFlags)
 
@@ -46,6 +49,11 @@ func main() {
 	default:
 		fmt.Fprintln(os.Stderr, "Specify an exchange")
 		os.Exit(1)
+	}
+
+	if *prod {
+		// Enable
+		streamcommons.AWSEnableProduction()
 	}
 
 	// main loop to endlessly dump

@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
 	"runtime/debug"
+	"strconv"
 	"time"
 
 	"github.com/exchangedataset/streamcommons"
@@ -33,6 +36,54 @@ type writer struct {
 	alwaysDisk    bool
 	logger        *log.Logger
 	sim           simulator.Simulator
+}
+
+func (w *writer) loadInitialContent(minute int64) (err error) {
+	// Find dataset with the same minute number (if exist, then append to it)
+	filename := fmt.Sprintf("%s_%s.gz", w.exchange, strconv.FormatInt(minute, 10))
+	// Find it in the local disk
+	filePath := path.Join(w.directory, filename)
+	var reader io.ReadCloser
+	if _, serr := os.Stat(filePath); os.IsNotExist(serr) {
+		// Find in S3
+		candidate, serr := streamcommons.S3ListV2(context.Background(), filename)
+		if serr != nil {
+			return fmt.Errorf("loadInitialContent: %v", serr)
+		}
+		if len(candidate) == 0 {
+			// No such object
+			return nil
+		} else if len(candidate) > 1 {
+			return errors.New("loadInitialContent: too many candidates")
+		}
+		reader, serr = streamcommons.GetS3Object(context.Background(), candidate[0])
+		if serr != nil {
+			return fmt.Errorf("loadInitialContent: %v", serr)
+		}
+		w.logger.Println("Partial dataset found in S3: appending")
+	} else {
+		// Might exist in local or not
+		reader, serr = os.Open(filePath)
+		if serr != nil {
+			return fmt.Errorf("loadInitialContent: %v", serr)
+		}
+		w.logger.Println("Partial dataset found in local disk: appending")
+	}
+	defer func() {
+		serr := reader.Close()
+		if serr != nil {
+			if err != nil {
+				err = fmt.Errorf("loadInitialContent: reader close: %v, originally: %v", serr, err)
+			} else {
+				err = fmt.Errorf("loadInitialContent: reader close: %v", err)
+			}
+		}
+	}()
+	_, serr := w.writer.ReadFrom(reader)
+	if serr != nil {
+		return fmt.Errorf("loadInitialContent: %v", serr)
+	}
+	return
 }
 
 func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err error) {
@@ -70,6 +121,7 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 		if err != nil {
 			return
 		}
+		w.loadInitialContent(minute)
 		// Write start line
 		startLine := fmt.Sprintf("start\t%d\t%s\n", timestamp, w.url)
 		_, err = w.gwriter.Write([]byte(startLine))
@@ -121,7 +173,7 @@ func (w *writer) beforeWrite(timestamp int64) (correctedTimestamp int64, err err
 		}
 	}
 	// Change file timestamp, this is used to generate file name
-	w.fileTimestamp = timestamp
+	w.fileTimestamp = minute
 	return
 }
 
@@ -136,7 +188,7 @@ func (w *writer) uploadOrStore() (err error) {
 		// Creating new reader from original buffer array because if you read bytes from
 		// buffer, read bytes will be lost from buffer
 		// We might use them later if s3 upload failed
-		err = streamcommons.PutS3Object(fileName, bytes.NewReader(w.buffer.Bytes()))
+		err = streamcommons.PutS3Object(context.Background(), fileName, bytes.NewReader(w.buffer.Bytes()))
 		if err == nil {
 			// successful
 			w.logger.Println("uploaded to s3:", fileName)
