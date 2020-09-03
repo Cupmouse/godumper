@@ -54,6 +54,8 @@ func main() {
 	if *prod {
 		// Enable
 		streamcommons.AWSEnableProduction()
+		a := false
+		alwaysDisk = &a
 	}
 
 	// main loop to endlessly dump

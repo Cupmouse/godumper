@@ -46,19 +46,12 @@ func (w *writer) loadInitialContent(minute int64) (err error) {
 	var reader io.ReadCloser
 	if _, serr := os.Stat(filePath); os.IsNotExist(serr) {
 		// Find in S3
-		candidate, serr := streamcommons.S3ListV2(context.Background(), filename)
+		reader, serr = streamcommons.GetS3Object(context.Background(), filename)
 		if serr != nil {
 			return fmt.Errorf("loadInitialContent: %v", serr)
 		}
-		if len(candidate) == 0 {
-			// No such object
+		if reader == nil {
 			return nil
-		} else if len(candidate) > 1 {
-			return errors.New("loadInitialContent: too many candidates")
-		}
-		reader, serr = streamcommons.GetS3Object(context.Background(), candidate[0])
-		if serr != nil {
-			return fmt.Errorf("loadInitialContent: %v", serr)
 		}
 		w.logger.Println("Partial dataset found in S3: appending")
 	} else {
