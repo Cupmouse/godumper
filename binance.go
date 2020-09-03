@@ -17,7 +17,7 @@ import (
 
 const binanceMaximumDepthSubscribe = 20
 
-var binancePrioritySymbols = []string{"BTCUSDT", "tETHUSD"}
+var binancePrioritySymbols = []string{"btcusdt", "ethusdt"}
 
 type binanceSubscriber struct {
 	depth jsonstructs.BinanceDepthREST
@@ -126,7 +126,8 @@ func binanceFetchLargestVolumeSymbols(ctx context.Context, logger *log.Logger) (
 		size = binanceMaximumDepthSubscribe
 	}
 	largeVolumeSymbols := make([]string, size)
-	for i := 0; i < size; i++ {
+	copy(largeVolumeSymbols, binancePrioritySymbols)
+	for i := len(binancePrioritySymbols); i < size; i++ {
 		largeVolumeSymbols[i] = strings.ToLower(usdVolumes[i].Symbol)
 	}
 	return largeVolumeSymbols, nil
