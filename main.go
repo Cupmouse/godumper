@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -105,10 +104,18 @@ func main() {
 		<-dumpErr
 		// Restart, but might have to wait for a little
 		if time.Now().Sub(lastStartTime) <= RapidRestartThreshold {
-			// this restart is counted as a rapid restart
-			waitTime := time.Duration(math.Pow(2, float64(recentRestartCount))) * time.Second
-			if waitTime >= RestartWaitTimeLimit {
+			// This restart counts as a rapid restart
+			var waitTime time.Duration
+			if recentRestartCount == 0 {
+				waitTime = time.Duration(0)
+			} else if (recentRestartCount - 1) >= 31 {
+				// 1 << 31 would flip the value into negative
 				waitTime = RestartWaitTimeLimit
+			} else {
+				waitTime = (1 << (recentRestartCount - 1)) * time.Second
+				if waitTime >= RestartWaitTimeLimit {
+					waitTime = RestartWaitTimeLimit
+				}
 			}
 			logger.Printf("rapid restart detected, waiting for %d seconds...\n", waitTime/time.Second)
 			time.Sleep(waitTime)
